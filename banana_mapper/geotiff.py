@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Callable, Optional
+
+import numpy as np
+import rasterio
+from affine import Affine
+from PIL import Image
+from pyproj import CRS
+from rasterio.enums import Resampling
+from rasterio.errors import RasterioIOError
+from rasterio.transform import array_bounds
+from rasterio.warp import calculate_default_transform, reproject, transform_bounds
+
+
+WGS84 = "EPSG:4326"
+
+
+class GeoTiffError(RuntimeError):
+    """Raised when a GeoTIFF cannot be prepared for map overlay."""
+
+
+@dataclass(frozen=True)
+class GeoTiffInfo:
+    file_path: Path
+    file_name: str
+    width: int
+    height: int
+    band_count: int
+    source_crs: str
+    source_crs_authority: str
+    display_crs: str
+    transform: tuple[float, float, float, float, float, float]
+    bounds_source: tuple[float, float, float, float]
+    bounds_wgs84: tuple[float, float, float, float]
+    preview_path: Path
+    preview_width: int
+    preview_height: int
+
+    @property
+    def west(self) -> float:
+        return self.bounds_wgs84[0]
+
+    @property
+    def south(self) -> float:
+        return self.bounds_wgs84[1]
+
+    @property
+    def east(self) -> float:
+        return self.bounds_wgs84[2]
+
+    @property
+    def north(self) -> float:
+        return self.bounds_wgs84[3]
+
+    @property
+    def pixel_size_x(self) -> float:
+        return abs(self.transform[0])
+
+    @property
+    def pixel_size_y(self) -> float:
+        return abs(self.transform[4])
+
+    @property
+    def spatial_resolution_label(self) -> str:
+        units = "source units/pixel"
+        if self.source_crs_authority.startswith("EPSG:4326"):
+            units = "degrees/pixel"
+        elif self.source_crs_authority:
+            units = "CRS units/pixel"
+        return f"{self.pixel_size_x:.8f} x {self.pixel_size_y:.8f} {units}"
+
+    @property
+    def pixel_resolution_label(self) -> str:
+        return f"{self.width:,} x {self.height:,} px"
+
+    @property
+    def preview_resolution_label(self) -> str:
+        return f"{self.preview_width:,} x {self.preview_height:,} px"
+
+
+# Progress stages and their approximate cumulative weight (0-100)
+_STAGES = [
+    (5,  "Opening file and reading metadata..."),
+    (15, "Validating raster metadata..."),
+    (25, "Parsing CRS and computing source bounds..."),
+    (35, "Projecting bounds to WGS84..."),
+    (45, "Computing optimal display grid..."),
+    (80, "Reprojecting bands to RGBA (this may take a moment)..."),
+    (90, "Finalizing spatial extent..."),
+    (96, "Saving preview image to disk..."),
+    (100, "Done."),
+]
+
+_ProgressCb = Optional[Callable[[int, str], None]]
+
+
+def _report(cb: _ProgressCb, percent: int, message: str) -> None:
+    if cb is not None:
+        cb(percent, message)
+
+
+def load_geotiff_for_leaflet(
+    path: str | Path,
+    max_preview_pixels: int = 200_000_000,  # ~200 MP – preserve detail for deep zoom
+    progress_callback: _ProgressCb = None,
+) -> GeoTiffInfo:
+    """Read a GeoTIFF and export a map-ready EPSG:4326 PNG preview.
+
+    Leaflet image overlays are bounded by south/west/north/east coordinates in
+    EPSG:4326. This function uses rasterio's CRS-aware warp tools so rasters in
+    projected CRSs, such as UTM drone products, are positioned from their actual
+    geospatial extent instead of screen or pixel dimensions.
+
+    Args:
+        path: Path to the GeoTIFF file.
+        max_preview_pixels: Maximum pixels for the preview image.
+        progress_callback: Optional callable(percent: int, message: str) invoked
+            at each processing stage. Safe to call from a background thread.
+    """
+
+    cb = progress_callback
+    file_path = Path(path)
+
+    _report(cb, 5, "Opening file and reading metadata...")
+    if not file_path.exists():
+        raise GeoTiffError("The selected file does not exist.")
+
+    try:
+        with rasterio.open(file_path) as dataset:
+            _report(cb, 15, "Validating raster metadata...")
+            _validate_dataset(dataset)
+
+            _report(cb, 25, "Parsing CRS and computing source bounds...")
+            source_crs = CRS.from_user_input(dataset.crs)
+            bounds_source = (
+                float(dataset.bounds.left),
+                float(dataset.bounds.bottom),
+                float(dataset.bounds.right),
+                float(dataset.bounds.top),
+            )
+
+            _report(cb, 35, "Projecting bounds to WGS84...")
+            bounds_wgs84 = _bounds_to_wgs84(dataset.crs, bounds_source)
+
+            _report(cb, 45, "Computing optimal display grid...")
+            dst_transform, dst_width, dst_height = _display_grid(dataset, max_preview_pixels)
+
+            _report(cb, 50, f"Reprojecting raster to RGBA ({dst_width:,} x {dst_height:,} px)...")
+            rgba = _reproject_to_rgba(dataset, dst_transform, dst_width, dst_height)
+
+            _report(cb, 90, "Finalizing spatial extent...")
+            # dst_bounds is derived directly from the output reprojected transform
+            # and represents the exact pixel extent of the preview PNG – use it
+            # as the primary source of truth for Leaflet overlay registration.
+            dst_bounds = array_bounds(dst_height, dst_width, dst_transform)
+            exact_bounds_wgs84 = _normalize_bounds(
+                dst_bounds[0], dst_bounds[1], dst_bounds[2], dst_bounds[3]
+            )
+            # Sanity-check: if the source-projected bounds are valid WGS84 and
+            # both sets agree to within ~0.001 °, prefer the source bounds which
+            # may have sub-pixel accuracy at the edge.
+            if _bounds_are_valid(bounds_wgs84) and _bounds_close(bounds_wgs84, exact_bounds_wgs84):
+                exact_bounds_wgs84 = bounds_wgs84
+
+            _report(cb, 96, "Saving preview image to disk...")
+            preview_path = _save_preview_png(rgba, file_path.stem)
+
+            _report(cb, 100, "Done.")
+            return GeoTiffInfo(
+                file_path=file_path,
+                file_name=file_path.name,
+                width=dataset.width,
+                height=dataset.height,
+                band_count=dataset.count,
+                source_crs=source_crs.to_string(),
+                source_crs_authority=_authority_label(source_crs),
+                display_crs=WGS84,
+                transform=tuple(float(value) for value in dataset.transform[:6]),
+                bounds_source=bounds_source,
+                bounds_wgs84=exact_bounds_wgs84,
+                preview_path=preview_path,
+                preview_width=dst_width,
+                preview_height=dst_height,
+            )
+    except RasterioIOError as exc:
+        raise GeoTiffError("The selected file is not a readable GeoTIFF.") from exc
+    except GeoTiffError:
+        raise
+    except Exception as exc:
+        raise GeoTiffError(f"Unable to process GeoTIFF: {exc}") from exc
+
+
+def _validate_dataset(dataset: rasterio.DatasetReader) -> None:
+    if dataset.crs is None:
+        raise GeoTiffError("Missing geospatial metadata: no CRS was found.")
+    if dataset.transform is None or dataset.transform.is_identity:
+        raise GeoTiffError("Missing geospatial metadata: no valid geotransform was found.")
+    if dataset.width <= 0 or dataset.height <= 0 or dataset.count <= 0:
+        raise GeoTiffError("Invalid raster dimensions or band count.")
+    if dataset.bounds.left == dataset.bounds.right or dataset.bounds.bottom == dataset.bounds.top:
+        raise GeoTiffError("Invalid spatial extent: bounds have no area.")
+
+
+def _bounds_to_wgs84(crs: rasterio.crs.CRS, bounds: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    west, south, east, north = transform_bounds(
+        crs,
+        WGS84,
+        bounds[0],
+        bounds[1],
+        bounds[2],
+        bounds[3],
+        densify_pts=21,
+    )
+    return _normalize_bounds(west, south, east, north)
+
+
+def _display_grid(dataset: rasterio.DatasetReader, max_preview_pixels: int) -> tuple[rasterio.Affine, int, int]:
+    transform, width, height = calculate_default_transform(
+        dataset.crs,
+        WGS84,
+        dataset.width,
+        dataset.height,
+        *dataset.bounds,
+    )
+
+    if width <= 0 or height <= 0:
+        raise GeoTiffError("Unable to calculate a valid WGS84 display grid.")
+
+    pixel_count = width * height
+    if pixel_count <= max_preview_pixels:
+        return transform, width, height
+
+    scale = (max_preview_pixels / pixel_count) ** 0.5
+    scaled_width = max(1, int(width * scale))
+    scaled_height = max(1, int(height * scale))
+    scaled_transform = transform * Affine.scale(width / scaled_width, height / scaled_height)
+    return scaled_transform, scaled_width, scaled_height
+
+
+def _reproject_to_rgba(
+    dataset: rasterio.DatasetReader,
+    dst_transform: rasterio.Affine,
+    dst_width: int,
+    dst_height: int,
+) -> np.ndarray:
+    color_indexes = _color_band_indexes(dataset)
+    source_nodata = dataset.nodata
+
+    color = np.zeros((len(color_indexes), dst_height, dst_width), dtype=np.float32)
+    for target_index, source_index in enumerate(color_indexes):
+        reproject(
+            source=rasterio.band(dataset, source_index),
+            destination=color[target_index],
+            src_transform=dataset.transform,
+            src_crs=dataset.crs,
+            dst_transform=dst_transform,
+            dst_crs=WGS84,
+            src_nodata=source_nodata,
+            dst_nodata=np.nan,
+            resampling=Resampling.bilinear,
+        )
+
+    alpha = _alpha_band(dataset, dst_transform, dst_width, dst_height)
+    if alpha is None:
+        alpha = _alpha_from_valid_pixels(color, source_nodata)
+
+    rgb = _normalize_rgb(color)
+    return np.dstack([rgb, alpha])
+
+
+def _color_band_indexes(dataset: rasterio.DatasetReader) -> list[int]:
+    if dataset.count >= 3:
+        return [1, 2, 3]
+    return [1, 1, 1]
+
+
+def _alpha_band(
+    dataset: rasterio.DatasetReader,
+    dst_transform: rasterio.Affine,
+    dst_width: int,
+    dst_height: int,
+) -> Optional[np.ndarray]:
+    if dataset.count < 4:
+        return None
+
+    alpha = np.zeros((dst_height, dst_width), dtype=np.float32)
+    reproject(
+        source=rasterio.band(dataset, 4),
+        destination=alpha,
+        src_transform=dataset.transform,
+        src_crs=dataset.crs,
+        dst_transform=dst_transform,
+        dst_crs=WGS84,
+        src_nodata=0,
+        dst_nodata=0,
+        resampling=Resampling.nearest,
+    )
+    return np.clip(alpha, 0, 255).astype(np.uint8)
+
+
+def _alpha_from_valid_pixels(color: np.ndarray, source_nodata: Optional[float]) -> np.ndarray:
+    finite_mask = np.isfinite(color).all(axis=0)
+    if source_nodata is not None:
+        finite_mask &= np.any(color != source_nodata, axis=0)
+    return np.where(finite_mask, 255, 0).astype(np.uint8)
+
+
+def _normalize_rgb(color: np.ndarray) -> np.ndarray:
+    output = np.zeros_like(color, dtype=np.uint8)
+    for index, band in enumerate(color):
+        valid = np.isfinite(band)
+        if not np.any(valid):
+            continue
+
+        values = band[valid]
+        if np.issubdtype(values.dtype, np.integer):
+            band_min = float(values.min())
+            band_max = float(values.max())
+        else:
+            band_min = float(np.nanpercentile(values, 2))
+            band_max = float(np.nanpercentile(values, 98))
+
+        if band_max <= band_min:
+            output[index][valid] = np.clip(values, 0, 255).astype(np.uint8)
+            continue
+
+        scaled = (band - band_min) * (255.0 / (band_max - band_min))
+        scaled = np.nan_to_num(scaled, nan=0.0, posinf=255.0, neginf=0.0)
+        output[index] = np.clip(scaled, 0, 255).astype(np.uint8)
+        output[index][~valid] = 0
+    return np.moveaxis(output, 0, -1)
+
+
+def _save_preview_png(rgba: np.ndarray, stem: str) -> Path:
+    safe_stem = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem)[:48]
+    temp = NamedTemporaryFile(prefix=f"banana_mapper_{safe_stem}_", suffix=".png", delete=False)
+    temp.close()
+    Image.fromarray(rgba, mode="RGBA").save(temp.name, optimize=True)
+    return Path(temp.name)
+
+
+def _normalize_bounds(west: float, south: float, east: float, north: float) -> tuple[float, float, float, float]:
+    left, right = sorted((float(west), float(east)))
+    bottom, top = sorted((float(south), float(north)))
+    return left, bottom, right, top
+
+
+def _bounds_are_valid(bounds: tuple[float, float, float, float]) -> bool:
+    west, south, east, north = bounds
+    return -180 <= west <= 180 and -180 <= east <= 180 and -90 <= south <= 90 and -90 <= north <= 90
+
+
+def _bounds_close(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+    tol: float = 0.005,
+) -> bool:
+    """Return True when two bounding-box tuples agree within *tol* degrees."""
+    return all(abs(ai - bi) <= tol for ai, bi in zip(a, b))
+
+
+def _authority_label(crs: CRS) -> str:
+    authority = crs.to_authority()
+    if authority:
+        return f"{authority[0]}:{authority[1]}"
+    return crs.name or crs.to_string()

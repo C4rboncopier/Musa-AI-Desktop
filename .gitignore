@@ -1,0 +1,50 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and local env files
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# Local application data
+.banana_mapper/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+cache/
+**/cache/
+
+# Generated outputs and heavy local artifacts
+test output/
+outputs/
+output/
+exports/
+*.pt
+*.onnx
+*.engine
+*.tif
+*.tiff
+*.xlsx
+*.csv
+banana_ai_mapping_results.*
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Musa AI GIS View</title>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <style>
+    :root {
+      --map-bg: #0a0f1a;
+      --ctrl-bg: #131e33;
+      --ctrl-fg: #c8d6e5;
+      --attr-bg: rgba(14,21,37,0.85);
+      --attr-fg: #94a3b8;
+      --tooltip-bg: rgba(14,21,37,0.92);
+      --tooltip-border: rgba(59,130,246,0.45);
+      --tooltip-fg: #dbeafe;
+      --extent-color: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    html, body, #map {
+      height: 100%;
+      margin: 0;
+      width: 100%;
+      background: var(--map-bg);
+      font-family: "Inter", "Segoe UI", Arial, sans-serif;
+    }
+    .leaflet-container { background: var(--map-bg); color: var(--ctrl-fg); }
+    .leaflet-control-attribution {
+      background: var(--attr-bg) !important;
+      color: var(--attr-fg) !important;
+      font-size: 10px;
+      border-radius: 4px 0 0 0;
+      padding: 3px 8px;
+    }
+    .leaflet-control-attribution a { color: var(--attr-fg) !important; }
+    .leaflet-control-scale-line {
+      background: var(--attr-bg);
+      border-color: var(--attr-fg);
+      color: var(--attr-fg);
+      font-size: 10px;
+      border-radius: 2px;
+    }
+    .leaflet-bar {
+      border: none !important;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .leaflet-bar a, .leaflet-bar a:hover {
+      background: var(--ctrl-bg);
+      color: var(--ctrl-fg);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      width: 32px;
+      height: 32px;
+      line-height: 32px;
+      font-size: 16px;
+    }
+    .leaflet-bar a:hover { filter: brightness(1.18); }
+    .map-error {
+      align-items: center;
+      color: #fecaca;
+      display: flex;
+      font-size: 15px;
+      height: 100%;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+    }
+    .overlay-label {
+      background: var(--tooltip-bg);
+      border: 1px solid var(--tooltip-border);
+      border-radius: 6px;
+      color: var(--tooltip-fg);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+    }
+    .coord-overlay {
+      position: absolute;
+      bottom: 6px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 900;
+      background: var(--attr-bg);
+      color: var(--attr-fg);
+      font-size: 10px;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      padding: 3px 10px;
+      border-radius: 4px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .layer-legend {
+      position: absolute;
+      bottom: 26px;
+      right: 10px;
+      z-index: 900;
+      background: var(--attr-bg);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 7px;
+      padding: 9px 11px;
+      min-width: 180px;
+      display: none;
+    }
+    .layer-legend.shown { display: block; }
+    .legend-title {
+      color: var(--ctrl-fg);
+      font-size: 10px;
+      font-weight: 800;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .legend-row {
+      align-items: center;
+      color: var(--attr-fg);
+      display: flex;
+      font-size: 10px;
+      gap: 7px;
+      line-height: 1.6;
+    }
+    .swatch {
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 2px;
+      display: inline-block;
+      height: 10px;
+      width: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="coordOverlay" class="coord-overlay"></div>
+  <div id="layerLegend" class="layer-legend">
+    <div class="legend-title">AI Point Layers</div>
+    <div class="legend-row"><span class="swatch" style="background:#fb923c"></span> Cut leaf</div>
+    <div class="legend-row"><span class="swatch" style="background:#c084fc"></span> Black sigatoka</div>
+    <div class="legend-row"><span class="swatch" style="background:#f87171"></span> Panama</div>
+  </div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script>
+  var bridge = null, map = null;
+  var imageOverlay = null, extentRectangle = null, labelTooltip = null;
+  var currentBounds = null, pendingOverlay = null, pendingDetections = null;
+  var overlayVisible = true, overlayOpacity = 0.78;
+  var detectionOpacity = 1.0;
+  var mapReady = false;
+  var currentExtentColor = "#3b82f6";
+  var detectionGroup = null;
+  var pointRenderer = null;
+  var detectionLayers = [];
+  var detectionLayerById = {};
+  var allRecords = [];
+  var detectionRenderTimer = null;
+  var MAX_VISIBLE_POINTS = 9000;
+  var pendingMouseLatLng = null;
+  var coordFrame = null;
+  var lastBridgeCoordAt = 0;
+  var lastCoordTextAt = 0;
+  var pinMarker = null;
+  var scanBoxLayer = null;
+  var detectionVisibility = {
+    full_leaf: false, cut_leaf: true,
+    black_sigatoka: true, panama: true,
+    healthy_leaf: false, diseased_leaf: false
+  };
+
+  var CLASS_STYLES = {
+    full_leaf:      { color: "#0891b2", fill: "#22d3ee", radius: 7, weight: 2, dash: null },
+    cut_leaf:       { color: "#c2410c", fill: "#fb923c", radius: 7, weight: 2, dash: null },
+    black_sigatoka: { color: "#7c3aed", fill: "#c084fc", radius: 8, weight: 2, dash: "5 4" },
+    panama:         { color: "#dc2626", fill: "#f87171", radius: 8, weight: 2, dash: "5 4" },
+    healthy_leaf:   { color: "#16a34a", fill: "#4ade80", radius: 7, weight: 2, dash: null },
+    diseased_leaf:  { color: "#ca8a04", fill: "#facc15", radius: 8, weight: 2, dash: null }
+  };
+  var coordEl = document.getElementById("coordOverlay");
+
+  function initializeMap() {
+    if (typeof L === "undefined") {
+      document.getElementById("map").innerHTML = '<div class="map-error">Leaflet could not be loaded.</div>';
+      return;
+    }
+    map = L.map("map", {
+      zoomControl: true,
+      preferCanvas: true,
+      worldCopyJump: false,
+      zoomAnimation: true,
+      fadeAnimation: true,
+      maxZoom: 25
+    }).setView([11.0, 122.0], 6);
+
+    createMapPanes();
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 25,
+      maxNativeZoom: 19,
+      crossOrigin: true,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+    L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
+    pointRenderer = L.canvas({ padding: 0.35 });
+    detectionGroup = L.layerGroup().addTo(map);
+
+    map.on("mousemove", function(e) {
+      pendingMouseLatLng = e.latlng;
+      if (!coordFrame) coordFrame = L.Util.requestAnimFrame(flushMousePosition);
+    });
+    map.on("zoomend", function() {
+      if (bridge) bridge.reportZoom(map.getZoom());
+      scheduleDetectionRender();
+    });
+    map.on("moveend resize", function() { scheduleDetectionRender(false); });
+
+    if (typeof qt !== "undefined" && qt.webChannelTransport) {
+      new QWebChannel(qt.webChannelTransport, function(ch) {
+        bridge = ch.objects.mapBridge;
+        bridge.reportZoom(map.getZoom());
+        bridge.reportMapReady();
+        if (pendingOverlay) {
+          var p = pendingOverlay;
+          pendingOverlay = null;
+          setOverlay(p);
+        }
+        if (pendingDetections) {
+          var q = pendingDetections;
+          pendingDetections = null;
+          setDetectionData(q);
+        }
+      });
+    }
+    mapReady = true;
+  }
+
+  function createMapPanes() {
+    map.createPane("geotiffPane");
+    map.getPane("geotiffPane").style.zIndex = 330;
+    map.getPane("geotiffPane").style.pointerEvents = "none";
+    map.createPane("detectionPane");
+    map.getPane("detectionPane").style.zIndex = 660;
+    map.getPane("detectionPane").style.pointerEvents = "auto";
+    map.createPane("scanPane");
+    map.getPane("scanPane").style.zIndex = 700;
+    map.getPane("scanPane").style.pointerEvents = "none";
+  }
+
+  function flushMousePosition() {
+    coordFrame = null;
+    if (!pendingMouseLatLng) return;
+    var ll = pendingMouseLatLng;
+    var now = Date.now();
+    if (coordEl && now - lastCoordTextAt > 120) {
+      coordEl.textContent = ll.lat.toFixed(7) + ",  " + ll.lng.toFixed(7);
+      lastCoordTextAt = now;
+    }
+    if (bridge && now - lastBridgeCoordAt > 250) {
+      bridge.reportCoordinates(ll.lat, ll.lng);
+      lastBridgeCoordAt = now;
+    }
+  }
+
+  function setOverlay(payload) {
+    if (!mapReady) { pendingOverlay = payload; return; }
+    clearOverlay();
+    currentBounds = L.latLngBounds(
+      [payload.bounds.south, payload.bounds.west],
+      [payload.bounds.north, payload.bounds.east]
+    );
+    imageOverlay = L.imageOverlay(payload.imageUrl, currentBounds, {
+      opacity: overlayVisible ? overlayOpacity : 0,
+      interactive: false,
+      crossOrigin: false,
+      zIndex: 300,
+      pane: "geotiffPane"
+    }).addTo(map);
+    extentRectangle = L.rectangle(currentBounds, {
+      color: currentExtentColor,
+      weight: 2,
+      opacity: 0.9,
+      fill: false,
+      dashArray: "6 5",
+      pane: "geotiffPane"
+    }).addTo(map);
+    labelTooltip = L.tooltip({ permanent: false, direction: "top", className: "overlay-label" })
+      .setLatLng(currentBounds.getCenter()).setContent(esc(payload.fileName)).addTo(map);
+    fitToOverlay();
+  }
+
+  function clearOverlay() {
+    if (!map) return;
+    if (imageOverlay) { map.removeLayer(imageOverlay); imageOverlay = null; }
+    if (extentRectangle) { map.removeLayer(extentRectangle); extentRectangle = null; }
+    if (labelTooltip) { map.removeLayer(labelTooltip); labelTooltip = null; }
+    currentBounds = null;
+  }
+
+  function setDetectionData(payload) {
+    if (!mapReady) { pendingDetections = payload; return; }
+    clearDetections();
+    detectionVisibility = Object.assign(detectionVisibility, payload.visibility || {});
+    if (typeof payload.opacity === "number") {
+      detectionOpacity = Math.max(0, Math.min(1, payload.opacity));
+    }
+    allRecords = (payload.records || []).map(prepareRecord).filter(Boolean);
+    scheduleDetectionRender(true);
+    document.getElementById("layerLegend").classList.toggle("shown", allRecords.length > 0);
+  }
+
+  function clearDetections() {
+    if (detectionGroup) detectionGroup.clearLayers();
+    if (detectionRenderTimer) {
+      clearTimeout(detectionRenderTimer);
+      detectionRenderTimer = null;
+    }
+    detectionLayers = [];
+    detectionLayerById = {};
+    allRecords = [];
+    document.getElementById("layerLegend").classList.remove("shown");
+  }
+
+  function prepareRecord(rec, index) {
+    var lat = Number(rec.latitude);
+    var lng = Number(rec.longitude);
+    if (!isFinite(lat) || !isFinite(lng)) return null;
+    rec._lat = lat;
+    rec._lng = lng;
+    rec._layerKeys = rec.layer_keys && rec.layer_keys.length ? rec.layer_keys : [rec.class_name];
+    rec._renderId = String(rec.id || (rec.image_name || "record") + ":" + index);
+    return rec;
+  }
+
+  function buildDetectionLayer(rec) {
+    var layer = L.circleMarker([rec._lat, rec._lng], pointStyle(rec));
+    layer._record = rec;
+    layer._layerKeys = rec._layerKeys;
+    layer.bindPopup(buildPopup(rec), { maxWidth: 320 });
+    return layer;
+  }
+
+  function normalizeLatLngs(points) {
+    if (!Array.isArray(points)) return [];
+    return points
+      .filter(function(p) { return Array.isArray(p) && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]); })
+      .map(function(p) { return [Number(p[0]), Number(p[1])]; });
+  }
+
+  function setDetectionLayerVisible(layerKey, visible) {
+    detectionVisibility[layerKey] = visible;
+    scheduleDetectionRender(true);
+  }
+
+  function setDetectionOpacity(opacity) {
+    detectionOpacity = Math.max(0, Math.min(1, opacity));
+    if (detectionOpacity <= 0 || detectionLayers.length === 0) {
+      scheduleDetectionRender(true);
+      return;
+    }
+    detectionLayers.forEach(function(layer) {
+      if (!layer._record) return;
+      if (layer.setStyle) {
+        layer.setStyle(layer instanceof L.CircleMarker ? pointStyle(layer._record) : vectorStyle(layer._record));
+      }
+    });
+  }
+
+  function scheduleDetectionRender(immediate) {
+    if (!mapReady || !map || !detectionGroup) return;
+    if (detectionRenderTimer) clearTimeout(detectionRenderTimer);
+    detectionRenderTimer = setTimeout(renderVisibleDetections, immediate ? 0 : 80);
+  }
+
+  function renderVisibleDetections() {
+    detectionRenderTimer = null;
+    if (!map || !detectionGroup) return;
+    if (!allRecords.length || detectionOpacity <= 0) {
+      detectionGroup.clearLayers();
+      detectionLayers = [];
+      detectionLayerById = {};
+      return;
+    }
+
+    var viewBounds = map.getBounds().pad(0.18);
+    var visible = [];
+    for (var i = 0; i < allRecords.length; i++) {
+      var rec = allRecords[i];
+      if (!recordIsVisible(rec)) continue;
+      if (!viewBounds.contains([rec._lat, rec._lng])) continue;
+      visible.push(rec);
+    }
+
+    var stride = Math.max(1, Math.ceil(visible.length / MAX_VISIBLE_POINTS));
+    var wanted = {};
+    for (var j = 0; j < visible.length; j += stride) {
+      var rec = visible[j];
+      var id = rec._renderId;
+      wanted[id] = true;
+      var layer = detectionLayerById[id];
+      if (layer) {
+        layer.setStyle(pointStyle(rec));
+        continue;
+      }
+      layer = buildDetectionLayer(rec);
+      detectionLayerById[id] = layer;
+      detectionGroup.addLayer(layer);
+    }
+
+    Object.keys(detectionLayerById).forEach(function(id) {
+      if (wanted[id]) return;
+      var layer = detectionLayerById[id];
+      if (layer && detectionGroup.hasLayer(layer)) {
+        detectionGroup.removeLayer(layer);
+      }
+      delete detectionLayerById[id];
+    });
+    detectionLayers = Object.keys(detectionLayerById).map(function(id) {
+      return detectionLayerById[id];
+    });
+    if (!detectionLayers.length) {
+      detectionGroup.clearLayers();
+    }
+  }
+
+  function recordIsVisible(rec) {
+    var keys = rec._layerKeys || [];
+    for (var i = 0; i < keys.length; i++) {
+      if (detectionVisibility[keys[i]] !== false) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function vectorStyle(rec) {
+    var st = styleForRecord(rec);
+    return {
+      color: st.color,
+      fillColor: st.fill,
+      fillOpacity: detectionOpacity <= 0 ? 0 : Math.max(0.12, 0.34 * detectionOpacity),
+      opacity: detectionOpacity <= 0 ? 0 : Math.max(0.35, detectionOpacity),
+      weight: st.weight,
+      dashArray: st.dash,
+      pane: "detectionPane",
+      interactive: true
+    };
+  }
+
+  function pointStyle(rec) {
+    var st = styleForRecord(rec);
+    return {
+      color: st.color,
+      fillColor: st.fill,
+      fillOpacity: detectionOpacity <= 0 ? 0 : Math.max(0.45, 0.92 * detectionOpacity),
+      opacity: detectionOpacity <= 0 ? 0 : Math.max(0.55, detectionOpacity),
+      radius: scaledPointRadius(st.radius),
+      weight: Math.max(1, Math.min(2, st.weight)),
+      pane: "detectionPane",
+      renderer: pointRenderer,
+      interactive: true
+    };
+  }
+
+  function scaledPointRadius(baseRadius) {
+    var zoom = map ? map.getZoom() : 16;
+    var zoomScale = Math.pow(1.13, zoom - 17);
+    return Math.max(2, Math.min(7, baseRadius * zoomScale));
+  }
+
+  function styleForRecord(rec) {
+    var keys = rec._layerKeys || (rec.layer_keys && rec.layer_keys.length ? rec.layer_keys : [rec.class_name]);
+    if (keys.indexOf("black_sigatoka") !== -1) return CLASS_STYLES.black_sigatoka;
+    if (keys.indexOf("panama") !== -1) return CLASS_STYLES.panama;
+    if (keys.indexOf("cut_leaf") !== -1) return CLASS_STYLES.cut_leaf;
+    if (rec.health === "diseased" && CLASS_STYLES.diseased_leaf) return CLASS_STYLES.diseased_leaf;
+    if (rec.health === "healthy" && CLASS_STYLES.healthy_leaf) return CLASS_STYLES.healthy_leaf;
+    for (var i = 0; i < keys.length; i++) {
+      if (CLASS_STYLES[keys[i]]) return CLASS_STYLES[keys[i]];
+    }
+    return CLASS_STYLES[rec.class_name] || { color: "#38bdf8", fill: "#38bdf8", radius: 7, weight: 2, dash: null };
+  }
+
+  function buildPopup(rec) {
+    var conf = Math.round((rec.confidence || 0) * 1000) / 10;
+    return (
+      '<div style="font-size:12px;line-height:1.55">' +
+      '<div style="font-weight:700;margin-bottom:4px">' + esc(String(rec.class_name || "").replaceAll("_", " ")) + '</div>' +
+      (rec.health ? '<div><b>Health:</b> ' + esc(rec.health) + '</div>' : '') +
+      '<div><b>Confidence:</b> ' + conf + '%</div>' +
+      '<div><b>Image:</b> ' + esc(rec.image_name || "") + '</div>' +
+      '<div><b>Lat:</b> ' + Number(rec.latitude).toFixed(7) + '</div>' +
+      '<div><b>Lon:</b> ' + Number(rec.longitude).toFixed(7) + '</div>' +
+      '<div><b>Duplicates:</b> ' + (rec.duplicate_count || 1) + '</div>' +
+      '</div>'
+    );
+  }
+
+  function setPinLocation(lat, lon, filename) {
+    if (!map) return;
+    if (pinMarker) map.removeLayer(pinMarker);
+    pinMarker = L.circleMarker([lat, lon], {
+      color: "#ffffff",
+      fillColor: "#ef4444",
+      fillOpacity: 1,
+      opacity: 1,
+      radius: 8,
+      weight: 3,
+      pane: "detectionPane",
+      interactive: true
+    }).addTo(map);
+    pinMarker.bindPopup(
+      '<div style="font-size:12px;line-height:1.55">' +
+      '<div style="font-weight:700;margin-bottom:4px">Pinned Location</div>' +
+      '<div><b>Image:</b> ' + esc(filename || "") + '</div>' +
+      '<div><b>Lat:</b> ' + Number(lat).toFixed(7) + '</div>' +
+      '<div><b>Lon:</b> ' + Number(lon).toFixed(7) + '</div>' +
+      '</div>'
+    ).openPopup();
+    map.setView([lat, lon], Math.max(map.getZoom(), 18));
+  }
+
+  function clearPinLocation() {
+    if (pinMarker) {
+      map.removeLayer(pinMarker);
+      pinMarker = null;
+    }
+  }
+
+  function setScanBox(latMin, lonMin, latMax, lonMax) {
+    if (!map) return;
+    if (scanBoxLayer) {
+      map.removeLayer(scanBoxLayer);
+      scanBoxLayer = null;
+    }
+    if (latMin === 0 && lonMin === 0 && latMax === 0 && lonMax === 0) return;
+    scanBoxLayer = L.rectangle([[latMin, lonMin], [latMax, lonMax]], {
+      color: "#f59e0b",
+      weight: 3,
+      opacity: 0.9,
+      fillColor: "#fcd34d",
+      fillOpacity: 0.18,
+      dashArray: "10 5",
+      pane: "scanPane",
+      interactive: false
+    }).addTo(map);
+  }
+
+  function setOverlayVisible(visible) {
+    overlayVisible = visible;
+    if (imageOverlay) imageOverlay.setOpacity(visible ? overlayOpacity : 0);
+  }
+
+  function setOverlayOpacity(opacity) {
+    overlayOpacity = opacity;
+    if (imageOverlay && overlayVisible) imageOverlay.setOpacity(opacity);
+  }
+
+  function fitToOverlay() {
+    if (map && currentBounds) {
+      map.fitBounds(currentBounds, { padding: [12, 12], animate: true, duration: 0.35 });
+    }
+  }
+
+  function zoomIn() {
+    if (map) map.zoomIn();
+  }
+
+  function zoomOut() {
+    if (map) map.zoomOut();
+  }
+
+  function resetView() {
+    if (currentBounds) fitToOverlay();
+    else if (map) map.setView([11.0, 122.0], 6);
+  }
+
+  function applyTheme(t) {
+    var r = document.documentElement.style;
+    r.setProperty("--map-bg", t.mapBg);
+    r.setProperty("--ctrl-bg", t.ctrlBg);
+    r.setProperty("--ctrl-fg", t.ctrlFg);
+    r.setProperty("--attr-bg", t.attrBg);
+    r.setProperty("--attr-fg", t.attrFg);
+    r.setProperty("--tooltip-bg", t.tooltipBg);
+    r.setProperty("--tooltip-border", t.tooltipBorder);
+    r.setProperty("--tooltip-fg", t.tooltipFg);
+    r.setProperty("--extent-color", t.extentColor);
+    document.body.style.background = t.mapBg;
+    currentExtentColor = t.extentColor;
+    if (extentRectangle) extentRectangle.setStyle({ color: t.extentColor });
+  }
+
+  function esc(v) {
+    return String(v)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  initializeMap();
+  </script>
+</body>
+</html>
