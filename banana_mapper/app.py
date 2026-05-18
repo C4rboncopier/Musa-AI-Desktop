@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, QUrl
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtGui import QAction, QDesktopServices, QFont
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import (
     QApplication,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
 from .core.database import ProjectRepository
 from .core.geotiff_cache import GeoTiffSessionCache
 from .core.models import ProjectBundle
+from .core.output_manager import ProjectOutputManager
 from .detection import DetectionRecord, MappingResult
 from .geotiff import GeoTiffInfo
 from .loading_dialog import LoadingDialog
@@ -42,12 +44,13 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 720)
 
         self.repo = ProjectRepository()
+        self.output_manager = ProjectOutputManager()
         self.current_bundle: ProjectBundle | None = None
         self.current_geotiff: GeoTiffInfo | None = None
         self.latest_mapping_result: MappingResult | None = None
         self.geotiff_cache = GeoTiffSessionCache(
             max_items=4,
-            cache_dir=self.repo.db_path.parent / "cache" / "geotiff",
+            cache_dir=None,
         )
 
         self.map_ready = False
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._connect_signals()
         self._apply_theme(self._current_theme_name)
+        self._ensure_all_project_output_dirs()
         self.refresh_dashboard()
         self.workspace.load_map()
 
@@ -91,6 +95,14 @@ class MainWindow(QMainWindow):
         self.fit_action.setShortcut("Ctrl+F")
         self.fit_action.triggered.connect(self.fit_overlay)
 
+        self.project_explorer_action = QAction("Project Explorer", self)
+        self.project_explorer_action.setCheckable(True)
+        self.project_explorer_action.setChecked(True)
+
+        self.inspector_action = QAction("Inspector Panel", self)
+        self.inspector_action.setCheckable(True)
+        self.inspector_action.setChecked(True)
+
         self.exit_action = QAction("Exit", self)
         self.exit_action.triggered.connect(self.close)
 
@@ -103,6 +115,9 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("View")
         view_menu.addAction(self.fit_action)
         view_menu.addAction("Reset View", self.reset_view)
+        view_menu.addSeparator()
+        view_menu.addAction(self.project_explorer_action)
+        view_menu.addAction(self.inspector_action)
 
         theme_menu = self.menuBar().addMenu("Theme")
         for theme_name in THEMES:
@@ -146,7 +161,6 @@ class MainWindow(QMainWindow):
         self.workspace.importGeoTiffRequested.connect(self.open_geotiff)
         self.workspace.imageFolderRequested.connect(self.select_unstitched_folder)
         self.workspace.mrkFileRequested.connect(self.select_mrk_file)
-        self.workspace.outputFolderRequested.connect(self.select_output_folder)
         self.workspace.leafModelRequested.connect(lambda: self.load_model("leaf"))
         self.workspace.diseaseModelRequested.connect(lambda: self.load_model("disease"))
         self.workspace.runMappingRequested.connect(self.run_ai_mapping)
@@ -161,6 +175,21 @@ class MainWindow(QMainWindow):
         self.workspace.detectionOpacityChanged.connect(self._set_detection_opacity)
         self.workspace.detectionLayerChanged.connect(self._set_detection_layer_visible)
         self.workspace.resolutionChanged.connect(self._on_resolution_changed)
+        self.workspace.projectOutputOpenRequested.connect(self.open_project_output_folder)
+        self.workspace.outputsRefreshRequested.connect(self.refresh_project_outputs)
+        self.workspace.outputOpenRequested.connect(self.open_output_file)
+        self.workspace.outputRevealRequested.connect(self.reveal_output_file)
+        self.workspace.outputExportRequested.connect(self.export_output_file)
+        self.workspace.outputCopyPathRequested.connect(self.copy_output_path)
+        self.workspace.outputDeleteRequested.connect(self.delete_output_file)
+        self.project_explorer_action.toggled.connect(self.workspace.set_project_explorer_visible)
+        self.inspector_action.toggled.connect(self.workspace.set_inspector_visible)
+        self.workspace.projectExplorerVisibilityChanged.connect(
+            lambda visible: self._sync_view_action(self.project_explorer_action, visible)
+        )
+        self.workspace.inspectorVisibilityChanged.connect(
+            lambda visible: self._sync_view_action(self.inspector_action, visible)
+        )
 
         self.bridge.coordinatesChanged.connect(self._update_coordinates)
         self.bridge.zoomChanged.connect(self._update_zoom)
@@ -187,11 +216,11 @@ class MainWindow(QMainWindow):
         project = self.repo.create_project(
             dialog.project_name,
             dialog.description,
-            dialog.output_dir,
+            "",
             settings={"theme": self._current_theme_name, "autosave": True},
         )
-        if dialog.output_dir:
-            self.repo.upsert_asset(project.id, "output_dir", dialog.output_dir, label="Export folder")
+        output_dir = self._ensure_project_output_dir(project.id, project.name)
+        self._set_project_geotiff_cache(output_dir)
         self._apply_preferred_models_to_project(project.id)
         self.refresh_dashboard()
         self.open_project(project.id)
@@ -214,9 +243,13 @@ class MainWindow(QMainWindow):
             name=dialog.project_name,
             description=dialog.description,
         )
+        output_dir = self._ensure_project_output_dir(project_id, dialog.project_name)
+        if self.current_bundle is not None and self.current_bundle.project.id == project_id:
+            self._set_project_geotiff_cache(output_dir)
         if self.current_bundle is not None and self.current_bundle.project.id == project_id:
             self.current_bundle = self.repo.get_bundle(project_id)
             self.workspace.set_project(self.current_bundle)
+            self.refresh_project_outputs()
             self.project_status.setText(f"Project: {self.current_bundle.project.name}")
             self.workspace.append_log("Project title and description updated.")
         self.refresh_dashboard()
@@ -285,6 +318,9 @@ class MainWindow(QMainWindow):
             return
 
         self.repo.touch_project(project_id)
+        project = self.repo.get_project(project_id)
+        output_dir = self._ensure_project_output_dir(project.id, project.name)
+        self._set_project_geotiff_cache(output_dir)
         self.current_bundle = self.repo.get_bundle(project_id)
         self.current_geotiff = None
         self.latest_mapping_result = None
@@ -304,6 +340,7 @@ class MainWindow(QMainWindow):
         dialog.set_progress(8, "Loading project metadata...")
 
         self.workspace.set_project(self.current_bundle)
+        self.refresh_project_outputs()
         self.project_status.setText(f"Project: {self.current_bundle.project.name}")
         self.stack.setCurrentWidget(self.workspace)
         self.workspace.append_log(f"Opened project {self.current_bundle.project.name}.")
@@ -435,8 +472,15 @@ class MainWindow(QMainWindow):
     def _reload_current_bundle(self) -> ProjectBundle | None:
         if self.current_bundle is None:
             return None
+        output_dir = self._ensure_project_output_dir(
+            self.current_bundle.project.id,
+            self.current_bundle.project.name,
+            self.current_bundle.project.output_dir,
+        )
+        self._set_project_geotiff_cache(output_dir)
         self.current_bundle = self.repo.get_bundle(self.current_bundle.project.id)
         self.workspace.set_project(self.current_bundle)
+        self.refresh_project_outputs()
         self.refresh_dashboard()
         return self.current_bundle
 
@@ -455,6 +499,7 @@ class MainWindow(QMainWindow):
             )
             self.current_bundle = self.repo.get_bundle(self.current_bundle.project.id)
             self.workspace.set_project(self.current_bundle)
+            self.refresh_project_outputs()
 
         if log_message:
             self.workspace.append_log(log_message)
@@ -494,6 +539,13 @@ class MainWindow(QMainWindow):
 
     def _require_project(self) -> ProjectBundle | None:
         if self.current_bundle is not None:
+            output_dir = self._ensure_project_output_dir(
+                self.current_bundle.project.id,
+                self.current_bundle.project.name,
+                self.current_bundle.project.output_dir,
+            )
+            self._set_project_geotiff_cache(output_dir)
+            self.current_bundle = self.repo.get_bundle(self.current_bundle.project.id)
             return self.current_bundle
         QMessageBox.information(
             self,
@@ -503,6 +555,44 @@ class MainWindow(QMainWindow):
         self.show_dashboard()
         return None
 
+    def _ensure_all_project_output_dirs(self) -> None:
+        for project in self.repo.list_projects():
+            self._ensure_project_output_dir(project.id, project.name, project.output_dir)
+
+    def _ensure_project_output_dir(
+        self,
+        project_id: str,
+        project_name: str,
+        existing_output_dir: str = "",
+    ) -> Path:
+        if existing_output_dir:
+            output_dir = Path(existing_output_dir)
+            if self.output_manager.is_managed_path(output_dir):
+                output_dir = self.output_manager.ensure_project_dir_at(output_dir)
+            else:
+                output_dir = self.output_manager.ensure_project_dir(project_id, project_name)
+        else:
+            output_dir = self.output_manager.ensure_project_dir(project_id, project_name)
+        if str(output_dir) != existing_output_dir:
+            self._save_project_output_dir(project_id, output_dir)
+        return output_dir
+
+    def _current_output_dir(self) -> Path | None:
+        bundle = self._require_project()
+        if bundle is None:
+            return None
+        output_dir = self._ensure_project_output_dir(
+            bundle.project.id,
+            bundle.project.name,
+            bundle.project.output_dir,
+        )
+        self._set_project_geotiff_cache(output_dir)
+        return output_dir
+
+    def _set_project_geotiff_cache(self, project_output_dir: str | Path) -> None:
+        cache_dir = Path(project_output_dir) / "cache" / "geotiff"
+        self.geotiff_cache.set_cache_dir(cache_dir)
+
     def _log_missing_paths(self, bundle: ProjectBundle) -> None:
         missing = []
         for asset in bundle.assets:
@@ -511,8 +601,7 @@ class MainWindow(QMainWindow):
         for model in bundle.models:
             if not model.exists:
                 missing.append(model.path)
-        if bundle.project.output_dir and not Path(bundle.project.output_dir).exists():
-            missing.append(bundle.project.output_dir)
+        self._ensure_project_output_dir(bundle.project.id, bundle.project.name, bundle.project.output_dir)
         if missing:
             self.workspace.append_log(f"Missing local paths detected: {len(missing)}")
             for path in missing[:8]:
@@ -684,25 +773,90 @@ class MainWindow(QMainWindow):
         self.workspace.append_log(f"Linked MRK file for Coordinate QA: {path}")
         self.statusBar().showMessage("MRK file linked for Coordinate QA.", 3500)
 
-    def select_output_folder(self) -> None:
-        bundle = self._require_project()
-        if bundle is None:
+    def open_project_output_folder(self) -> None:
+        output_dir = self._current_output_dir()
+        if output_dir is None:
             return
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select export folder",
-            bundle.output_dir or "",
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_dir)))
+        self.statusBar().showMessage("Project output folder opened.", 2500)
+
+    def refresh_project_outputs(self) -> None:
+        if self.current_bundle is None:
+            self.workspace.set_outputs([])
+            return
+        output_dir = self._ensure_project_output_dir(
+            self.current_bundle.project.id,
+            self.current_bundle.project.name,
+            self.current_bundle.project.output_dir,
         )
-        if not folder:
+        self.workspace.set_outputs(self.output_manager.list_outputs_at(output_dir))
+
+    def open_output_file(self, path: str) -> None:
+        if not self._validate_managed_output(path):
             return
-        output_dir = Path(folder)
-        if not output_dir.exists() or not output_dir.is_dir():
-            QMessageBox.warning(self, "Invalid export folder", "Select an existing export folder.")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def reveal_output_file(self, path: str) -> None:
+        if not self._validate_managed_output(path):
             return
-        self._save_project_output_dir(bundle.project.id, output_dir)
-        self._reload_current_bundle()
-        self.workspace.append_log(f"Export folder set: {folder}")
-        self.statusBar().showMessage("Export folder saved.", 3500)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+    def copy_output_path(self, path: str) -> None:
+        if not self._validate_managed_output(path):
+            return
+        QApplication.clipboard().setText(str(Path(path)))
+        self.statusBar().showMessage("Output path copied.", 2500)
+
+    def export_output_file(self, path: str) -> None:
+        if not self._validate_managed_output(path):
+            return
+        source = Path(path)
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export generated output",
+            source.name,
+            "All files (*.*)",
+        )
+        if not target:
+            return
+        try:
+            shutil.copy2(source, target)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", f"Unable to export the selected file.\n\n{exc}")
+            return
+        self.statusBar().showMessage("Output file exported.", 3000)
+
+    def delete_output_file(self, path: str) -> None:
+        if not self._validate_managed_output(path):
+            return
+        file_path = Path(path)
+        answer = QMessageBox.question(
+            self,
+            "Delete Output File",
+            f"Delete this generated output?\n\n{file_path.name}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            file_path.unlink()
+        except OSError as exc:
+            QMessageBox.warning(self, "Delete failed", f"Unable to delete the output file.\n\n{exc}")
+            return
+        self.refresh_project_outputs()
+        self.statusBar().showMessage("Output file deleted.", 2500)
+
+    def _validate_managed_output(self, path: str | Path) -> bool:
+        file_path = Path(path)
+        if not file_path.exists() or not file_path.is_file():
+            QMessageBox.warning(self, "Output not found", "The selected output file no longer exists.")
+            self.refresh_project_outputs()
+            return False
+        if not self.output_manager.is_managed_path(file_path):
+            QMessageBox.warning(self, "Blocked", "Only system-managed project outputs can be opened here.")
+            return False
+        return True
 
     def load_model(self, role: str) -> None:
         bundle = self._require_project()
@@ -768,11 +922,12 @@ class MainWindow(QMainWindow):
             source_path = Path(image_folder.path)
             target_name = source_path.name
 
-        output_dir = self._resolve_mapping_output_dir(bundle, source_path)
-        if output_dir is None:
-            return
-        output_dir.mkdir(parents=True, exist_ok=True)
-        self._save_project_output_dir(bundle.project.id, output_dir)
+        project_output_dir = self._ensure_project_output_dir(
+            bundle.project.id,
+            bundle.project.name,
+            bundle.project.output_dir,
+        )
+        output_dir = self.output_manager.ensure_mapping_run_dir_at(project_output_dir)
         bundle = self._reload_current_bundle() or bundle
         self.repo.set_config(
             bundle.project.id,
@@ -819,49 +974,10 @@ class MainWindow(QMainWindow):
         if dialog.was_cancelled and self._active_mapping_worker is not None:
             self._active_mapping_worker.requestInterruption()
 
-    def _mapping_output_dir(self, bundle: ProjectBundle, source_path: Path) -> Path:
-        if bundle.output_dir:
-            return Path(bundle.output_dir)
-        return source_path if source_path.is_dir() else source_path.parent
-
-    def _resolve_mapping_output_dir(self, bundle: ProjectBundle, source_path: Path) -> Path | None:
-        if bundle.output_dir:
-            output_path = Path(bundle.output_dir)
-            if output_path.exists() and output_path.is_dir():
-                return output_path
-            QMessageBox.warning(
-                self,
-                "Export folder missing",
-                "The project export folder is missing or no longer valid. Select a new folder before AI mapping starts.",
-            )
-        return self._prompt_for_mapping_output_dir(bundle, source_path)
-
-    def _prompt_for_mapping_output_dir(self, bundle: ProjectBundle, source_path: Path) -> Path | None:
-        default_dir = self._mapping_output_dir(bundle, source_path)
-        if not default_dir.exists():
-            default_dir = source_path if source_path.is_dir() else source_path.parent
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select folder to save JSON and Excel results",
-            str(default_dir),
-        )
-        if not folder:
-            return None
-        output_dir = Path(folder)
-        if not output_dir.exists() or not output_dir.is_dir():
-            QMessageBox.warning(
-                self,
-                "Invalid export folder",
-                "Select an existing folder for exported JSON and Excel results.",
-            )
-            return None
-        self._save_project_output_dir(bundle.project.id, output_dir)
-        return output_dir
-
     def _save_project_output_dir(self, project_id: str, output_dir: str | Path) -> None:
         output_path = Path(output_dir)
         self.repo.update_project(project_id, output_dir=str(output_path))
-        self.repo.upsert_asset(project_id, "output_dir", str(output_path), label="Export folder")
+        self.repo.upsert_asset(project_id, "output_dir", str(output_path), label="Output folder")
 
     def _on_mapping_progress(self, percent: int, message: str) -> None:
         if self.sender() is not self._active_mapping_worker:
@@ -902,6 +1018,7 @@ class MainWindow(QMainWindow):
                 },
             )
             self._reload_current_bundle()
+            self.refresh_project_outputs()
         skipped = f", {result.skipped_images} skipped" if result.skipped_images else ""
         self.workspace.append_log(
             f"AI mapping complete: {result.processed_images} processed{skipped}. "
@@ -1095,33 +1212,39 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Preferences")
         box.setIcon(QMessageBox.Icon.Information)
-        cache_path = self.geotiff_cache.cache_dir or self.repo.db_path.parent / "cache" / "geotiff"
+        cache_path = self.geotiff_cache.cache_dir
+        cache_text = str(cache_path) if cache_path else "Open a project to activate its GeoTIFF preview cache."
         box.setText(
             "Offline database:\n"
             f"{self.repo.db_path}\n\n"
-            "System cache:\n"
-            f"{cache_path}\n\n"
+            "System output root:\n"
+            f"{self.output_manager.root_dir}\n\n"
+            "Current project GeoTIFF cache:\n"
+            f"{cache_text}\n\n"
             "Storage policy:\n"
-            "Only file paths, project metadata, settings, result summaries, and reusable GeoTIFF preview cache files are stored locally."
+            "Project outputs and reusable GeoTIFF previews are stored inside each project's managed output folder."
         )
-        clear_btn = box.addButton("Clear System Cache", QMessageBox.ButtonRole.DestructiveRole)
+        clear_btn = None
+        if cache_path is not None:
+            clear_btn = box.addButton("Clear Project Cache", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Ok)
         box.exec()
-        if box.clickedButton() is not clear_btn:
+        if clear_btn is None or box.clickedButton() is not clear_btn:
             return
 
         confirm = QMessageBox.question(
             self,
-            "Clear System Cache",
-            "Clear cached GeoTIFF previews?\n\nOriginal GeoTIFFs, project records, models, and exports will not be deleted.",
+            "Clear Project Cache",
+            "Clear cached GeoTIFF previews for this project?\n\nOriginal GeoTIFFs, project records, models, and generated outputs will not be deleted.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
         self.geotiff_cache.clear()
-        self.statusBar().showMessage("System cache cleared.", 4000)
-        QMessageBox.information(self, "System Cache", "Cached GeoTIFF previews have been cleared.")
+        self.refresh_project_outputs()
+        self.statusBar().showMessage("Project GeoTIFF cache cleared.", 4000)
+        QMessageBox.information(self, "Project Cache", "Cached GeoTIFF previews for this project have been cleared.")
 
     # ------------------------------------------------------------------
     # Theming
@@ -1159,6 +1282,14 @@ class MainWindow(QMainWindow):
             "extentColor": theme.extent_color,
         }
         self._run_js(f"applyTheme({json.dumps(payload)});")
+
+    @staticmethod
+    def _sync_view_action(action: QAction, checked: bool) -> None:
+        if action.isChecked() == checked:
+            return
+        action.blockSignals(True)
+        action.setChecked(checked)
+        action.blockSignals(False)
 
 
 def _record_from_payload(payload: dict) -> DetectionRecord:

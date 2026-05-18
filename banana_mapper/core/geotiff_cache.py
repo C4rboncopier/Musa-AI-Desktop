@@ -28,6 +28,15 @@ class GeoTiffSessionCache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._items: OrderedDict[GeoTiffCacheKey, GeoTiffInfo] = OrderedDict()
 
+    def set_cache_dir(self, cache_dir: str | Path | None) -> None:
+        next_dir = Path(cache_dir) if cache_dir else None
+        if next_dir == self.cache_dir:
+            return
+        self._items.clear()
+        self.cache_dir = next_dir
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
     def get(self, path: str | Path, max_preview_pixels: int) -> GeoTiffInfo | None:
         key = self._key(path, max_preview_pixels)
         if key is None:

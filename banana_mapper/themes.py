@@ -518,6 +518,36 @@ def generate_stylesheet(theme: ThemeColors) -> str:
             color: {t.meta_value_fg};
             font-size: 11px;
         }}
+        #exportPathSummary {{
+            background: {t.secondary_bg};
+            border: 1px solid {t.secondary_border};
+            border-radius: 6px;
+        }}
+        #exportPathName {{
+            color: {t.title_fg};
+            font-size: 12px;
+            font-weight: 700;
+        }}
+        #exportPathLocation {{
+            color: {t.body_fg};
+            font-family: "Cascadia Code", "Consolas", monospace;
+            font-size: 10px;
+        }}
+        #compactButton {{
+            background: transparent;
+            border: 1px solid {t.secondary_border};
+            border-radius: 5px;
+            color: {t.secondary_fg};
+            font-size: 11px;
+            font-weight: 700;
+            min-height: 24px;
+            padding: 0 9px;
+            text-align: center;
+        }}
+        #compactButton:hover {{
+            background: {t.secondary_hover_bg};
+            border-color: {t.secondary_hover_border};
+        }}
 
         /* ---- Checkbox ---- */
         QCheckBox {{
@@ -928,6 +958,55 @@ def generate_stylesheet(theme: ThemeColors) -> str:
             color: {t.body_fg};
             font-size: 10px;
             font-family: "Cascadia Code", "Consolas", monospace;
+        }}
+        #outputRow {{
+            background: {t.secondary_bg};
+            border: 1px solid {t.secondary_border};
+            border-radius: 7px;
+        }}
+        #outputTitle {{
+            color: {t.title_fg};
+            font-size: 12px;
+            font-weight: 700;
+        }}
+        #outputPath {{
+            color: {t.body_fg};
+            font-size: 10px;
+            font-family: "Cascadia Code", "Consolas", monospace;
+        }}
+        #outputMeta {{
+            color: {t.meta_value_fg};
+            font-size: 10px;
+        }}
+        #miniActionButton,
+        #miniDangerButton {{
+            min-height: 24px;
+            max-height: 24px;
+            border-radius: 5px;
+            padding: 0 8px;
+            font-size: 10px;
+            font-weight: 700;
+            text-align: center;
+        }}
+        #miniActionButton {{
+            background: {t.card_bg};
+            color: {t.secondary_fg};
+            border: 1px solid {t.secondary_border};
+        }}
+        #miniActionButton:hover {{
+            background: {t.secondary_hover_bg};
+            border-color: {t.secondary_hover_border};
+            color: {t.title_fg};
+        }}
+        #miniDangerButton {{
+            background: transparent;
+            color: #fca5a5;
+            border: 1px solid rgba(248, 113, 113, 0.35);
+        }}
+        #miniDangerButton:hover {{
+            background: rgba(153, 27, 27, 0.28);
+            border-color: #ef4444;
+            color: #fee2e2;
         }}
         #statusPill {{
             border-radius: 4px;

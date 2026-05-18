@@ -33,7 +33,9 @@ class NewProjectDialog(QDialog):
 
         title = QLabel("Create Project")
         title.setObjectName("dialogTitle")
-        subtitle = QLabel("Projects keep GeoTIFFs, image folders, AI models, exports, and analysis metadata isolated.")
+        subtitle = QLabel(
+            "Projects keep GeoTIFFs, image folders, AI models, generated outputs, and analysis metadata isolated."
+        )
         subtitle.setObjectName("bodyText")
         subtitle.setWordWrap(True)
         root.addWidget(title)
@@ -49,22 +51,9 @@ class NewProjectDialog(QDialog):
         self.description_edit = QTextEdit()
         self.description_edit.setPlaceholderText("Purpose, plantation block, flight notes, or operator comments")
         self.description_edit.setFixedHeight(92)
-        self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Optional export folder")
-
-        browse_btn = QPushButton("Browse")
-        browse_btn.setObjectName("secondaryButton")
-        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        browse_btn.clicked.connect(self._select_output_dir)
-        output_row = QHBoxLayout()
-        output_row.setContentsMargins(0, 0, 0, 0)
-        output_row.setSpacing(8)
-        output_row.addWidget(self.output_edit, 1)
-        output_row.addWidget(browse_btn)
 
         form.addRow("Name", self.name_edit)
         form.addRow("Description", self.description_edit)
-        form.addRow("Export folder", output_row)
         root.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -89,19 +78,11 @@ class NewProjectDialog(QDialog):
 
     @property
     def output_dir(self) -> str:
-        return self.output_edit.text().strip()
-
-    def _select_output_dir(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select export folder", "")
-        if folder:
-            self.output_edit.setText(folder)
+        return ""
 
     def _validate_and_accept(self) -> None:
         if not self.project_name:
             QMessageBox.warning(self, "Project name required", "Enter a project name before creating it.")
-            return
-        if self.output_dir and not Path(self.output_dir).exists():
-            QMessageBox.warning(self, "Folder not found", "The selected export folder does not exist.")
             return
         self.accept()
 

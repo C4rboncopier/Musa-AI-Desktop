@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
@@ -25,8 +25,58 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.models import ProjectBundle
+from ..core.output_manager import OutputFile
 from ..geotiff import GeoTiffInfo
 from .widgets import ASSET_LABELS, MODEL_LABELS, AssetRow, MetricCard, card, meta_row, section_label
+
+
+class OutputFileRow(QFrame):
+    openRequested = pyqtSignal(str)
+    revealRequested = pyqtSignal(str)
+    exportRequested = pyqtSignal(str)
+    copyPathRequested = pyqtSignal(str)
+    deleteRequested = pyqtSignal(str)
+
+    def __init__(self, item: OutputFile, parent=None) -> None:
+        super().__init__(parent)
+        self.item = item
+        self.setObjectName("outputRow")
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QGridLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(5)
+
+        name = QLabel(self.item.path.name)
+        name.setObjectName("outputTitle")
+        name.setWordWrap(True)
+        rel_path = QLabel(self.item.relative_path)
+        rel_path.setObjectName("outputPath")
+        rel_path.setWordWrap(True)
+        details = QLabel(f"{self.item.file_type}  |  {self.item.size_label}  |  {self.item.created_at}")
+        details.setObjectName("outputMeta")
+
+        actions = QHBoxLayout()
+        actions.setSpacing(5)
+        for text, signal in [
+            ("Open", self.openRequested),
+            ("Reveal", self.revealRequested),
+            ("Export", self.exportRequested),
+            ("Copy", self.copyPathRequested),
+            ("Delete", self.deleteRequested),
+        ]:
+            btn = QPushButton(text)
+            btn.setObjectName("miniActionButton" if text != "Delete" else "miniDangerButton")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, sig=signal: sig.emit(str(self.item.path)))
+            actions.addWidget(btn)
+
+        layout.addWidget(name, 0, 0, 1, 2)
+        layout.addWidget(rel_path, 1, 0, 1, 2)
+        layout.addWidget(details, 2, 0)
+        layout.addLayout(actions, 3, 0, 1, 2)
 
 
 class WorkspacePage(QWidget):
@@ -34,7 +84,13 @@ class WorkspacePage(QWidget):
     importGeoTiffRequested = pyqtSignal()
     imageFolderRequested = pyqtSignal()
     mrkFileRequested = pyqtSignal()
-    outputFolderRequested = pyqtSignal()
+    projectOutputOpenRequested = pyqtSignal()
+    outputsRefreshRequested = pyqtSignal()
+    outputOpenRequested = pyqtSignal(str)
+    outputRevealRequested = pyqtSignal(str)
+    outputExportRequested = pyqtSignal(str)
+    outputCopyPathRequested = pyqtSignal(str)
+    outputDeleteRequested = pyqtSignal(str)
     leafModelRequested = pyqtSignal()
     diseaseModelRequested = pyqtSignal()
     runMappingRequested = pyqtSignal()
@@ -50,14 +106,24 @@ class WorkspacePage(QWidget):
     detectionLayerChanged = pyqtSignal(str, bool)
     dataSourceChanged = pyqtSignal(int)
     resolutionChanged = pyqtSignal(int)
+    projectExplorerVisibilityChanged = pyqtSignal(bool)
+    inspectorVisibilityChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.current_bundle: ProjectBundle | None = None
         self.asset_list_layout: QVBoxLayout | None = None
+        self.output_list_layout: QVBoxLayout | None = None
         self.metadata_labels: dict[str, QLabel] = {}
         self.count_labels: dict[str, QLabel] = {}
         self.layer_toggles: dict[str, QCheckBox] = {}
+        self.splitter: QSplitter | None = None
+        self.left_panel: QWidget | None = None
+        self.right_panel: QWidget | None = None
+        self._left_panel_width = 300
+        self._right_panel_width = 360
+        self._project_explorer_visible = True
+        self._inspector_visible = True
         self._resolution_options: list[tuple[str, int]] = [
             ("Maximum (65 MP, GPU optimized)", 65_000_000),
             ("High (40 MP)", 40_000_000),
@@ -104,19 +170,22 @@ class WorkspacePage(QWidget):
         topbar_layout.addWidget(self.run_btn)
         root.addWidget(topbar)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setObjectName("workspaceSplitter")
-        splitter.setHandleWidth(1)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("workspaceSplitter")
+        self.splitter.setHandleWidth(1)
 
-        left = self._build_left_panel()
+        self.left_panel = self._build_left_panel()
         center = self._build_map_panel()
-        right = self._build_right_panel()
-        splitter.addWidget(left)
-        splitter.addWidget(center)
-        splitter.addWidget(right)
-        splitter.setSizes([300, 850, 360])
-        splitter.setCollapsible(1, False)
-        root.addWidget(splitter, 1)
+        self.right_panel = self._build_right_panel()
+        self.splitter.addWidget(self.left_panel)
+        self.splitter.addWidget(center)
+        self.splitter.addWidget(self.right_panel)
+        self.splitter.setSizes([self._left_panel_width, 850, self._right_panel_width])
+        self.splitter.setCollapsible(0, True)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setCollapsible(2, True)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+        root.addWidget(self.splitter, 1)
 
         self._connect_ui()
 
@@ -134,13 +203,17 @@ class WorkspacePage(QWidget):
         self.created_label.setObjectName("metaValue")
         self.modified_label = QLabel("--")
         self.modified_label.setObjectName("metaValue")
-        self.output_label = QLabel("--")
-        self.output_label.setObjectName("metaValue")
-        self.output_label.setWordWrap(True)
+        self.export_name_label = QLabel("No folder selected")
+        self.export_name_label.setObjectName("exportPathName")
+        self.export_name_label.setWordWrap(True)
+        self.export_name_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.export_location_label = QLabel("Managed automatically")
+        self.export_location_label.setObjectName("exportPathLocation")
+        self.export_location_label.setWordWrap(True)
+        self.export_location_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         for title, value in [
             ("Created", self.created_label),
             ("Modified", self.modified_label),
-            ("Export", self.output_label),
         ]:
             row = QHBoxLayout()
             key = QLabel(title.upper())
@@ -148,10 +221,33 @@ class WorkspacePage(QWidget):
             row.addWidget(key)
             row.addWidget(value, 1, Qt.AlignmentFlag.AlignRight)
             pc_layout.addLayout(row)
-        output_btn = QPushButton("Change Folder")
-        output_btn.setObjectName("secondaryButton")
-        output_btn.clicked.connect(lambda _=False: self.outputFolderRequested.emit())
-        pc_layout.addWidget(output_btn)
+
+        export_header = QHBoxLayout()
+        export_header.setSpacing(8)
+        export_key = QLabel("EXPORT")
+        export_key.setObjectName("metaKey")
+        export_header.addWidget(export_key)
+        export_header.addStretch(1)
+        output_btn = QPushButton("Open")
+        output_btn.setObjectName("compactButton")
+        output_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        output_btn.clicked.connect(lambda _=False: self.projectOutputOpenRequested.emit())
+        export_header.addWidget(output_btn)
+
+        export_summary = QFrame()
+        export_summary.setObjectName("exportPathSummary")
+        export_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        export_summary_layout = QVBoxLayout(export_summary)
+        export_summary_layout.setContentsMargins(10, 8, 10, 8)
+        export_summary_layout.setSpacing(3)
+        export_summary_layout.addWidget(self.export_name_label)
+        export_summary_layout.addWidget(self.export_location_label)
+
+        export_block = QVBoxLayout()
+        export_block.setSpacing(6)
+        export_block.addLayout(export_header)
+        export_block.addWidget(export_summary)
+        pc_layout.addLayout(export_block)
         layout.addWidget(project_card)
 
         layout.addWidget(section_label("Layers"))
@@ -276,6 +372,7 @@ class WorkspacePage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("inspectorTabs")
         self.tabs.addTab(self._assets_tab(), "Assets")
+        self.tabs.addTab(self._outputs_tab(), "Outputs")
         self.tabs.addTab(self._ai_tab(), "AI")
         self.tabs.addTab(self._metadata_tab(), "Metadata")
         self.tabs.addTab(self._logs_tab(), "Console")
@@ -333,6 +430,41 @@ class WorkspacePage(QWidget):
         layout.addWidget(scroll, 1)
         return tab
 
+    def _outputs_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        title = QLabel("Project Output Manager")
+        title.setObjectName("panelTitle")
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setObjectName("compactButton")
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.clicked.connect(lambda _=False: self.outputsRefreshRequested.emit())
+        open_btn = QPushButton("Open Folder")
+        open_btn.setObjectName("compactButton")
+        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn.clicked.connect(lambda _=False: self.projectOutputOpenRequested.emit())
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(refresh_btn)
+        header.addWidget(open_btn)
+        layout.addLayout(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        self.output_list_layout = QVBoxLayout(content)
+        self.output_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.output_list_layout.setSpacing(8)
+        self.output_list_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        return tab
+
     def _ai_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -357,7 +489,7 @@ class WorkspacePage(QWidget):
         self.mrk_status = QLabel("MRK file: --")
         self.mrk_status.setObjectName("metaValue")
         self.mrk_status.setWordWrap(True)
-        self.output_status = QLabel("Export folder: --")
+        self.output_status = QLabel("Output: system-managed project folder")
         self.output_status.setObjectName("metaValue")
         self.output_status.setWordWrap(True)
         self.leaf_model_status = QLabel("Leaf model: --")
@@ -371,10 +503,6 @@ class WorkspacePage(QWidget):
         w_layout.addWidget(self.output_status)
         w_layout.addWidget(self.leaf_model_status)
         w_layout.addWidget(self.disease_model_status)
-        output_btn = QPushButton("Change Folder")
-        output_btn.setObjectName("secondaryButton")
-        output_btn.clicked.connect(lambda _=False: self.outputFolderRequested.emit())
-        w_layout.addWidget(output_btn)
         run_btn = QPushButton("Run AI Mapping")
         run_btn.setObjectName("primaryButton")
         run_btn.clicked.connect(lambda _=False: self.runMappingRequested.emit())
@@ -465,16 +593,45 @@ class WorkspacePage(QWidget):
         self.created_label.setText(project.created_at.replace("T", " ")[:16])
         self.modified_label.setText(project.modified_at.replace("T", " ")[:16])
         output_text = self._output_text(project.output_dir)
-        self.output_label.setText(output_text)
+        export_name, export_location = self._export_display_parts(output_text)
+        self.export_name_label.setText(export_name)
+        self.export_location_label.setText(export_location)
+        self.export_name_label.setToolTip(output_text)
+        self.export_location_label.setToolTip(output_text)
         self.folder_status.setText(f"Image folder: {self._asset_name(bundle.image_folder_path)}")
         mrk_asset = bundle.first_asset("mrk_file")
         self.mrk_status.setText(f"MRK file: {mrk_asset.display_name if mrk_asset else '--'}")
-        self.output_status.setText(f"Export folder: {output_text}")
+        self.output_status.setText(f"Output: system-managed at {output_text}")
         leaf = bundle.first_model("leaf")
         disease = bundle.first_model("disease")
         self.leaf_model_status.setText(f"Leaf model: {leaf.display_name if leaf else '--'}")
         self.disease_model_status.setText(f"Disease model: {disease.display_name if disease else '--'}")
         self.render_assets(bundle)
+
+    def set_outputs(self, outputs: list[OutputFile]) -> None:
+        if self.output_list_layout is None:
+            return
+        while self.output_list_layout.count() > 1:
+            item = self.output_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        if not outputs:
+            empty = QLabel("No generated outputs yet.")
+            empty.setObjectName("bodyText")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.output_list_layout.insertWidget(0, empty)
+            return
+
+        for output in outputs:
+            row = OutputFileRow(output)
+            row.openRequested.connect(self.outputOpenRequested.emit)
+            row.revealRequested.connect(self.outputRevealRequested.emit)
+            row.exportRequested.connect(self.outputExportRequested.emit)
+            row.copyPathRequested.connect(self.outputCopyPathRequested.emit)
+            row.deleteRequested.connect(self.outputDeleteRequested.emit)
+            self.output_list_layout.insertWidget(self.output_list_layout.count() - 1, row)
 
     def render_assets(self, bundle: ProjectBundle) -> None:
         if self.asset_list_layout is None:
@@ -539,6 +696,18 @@ class WorkspacePage(QWidget):
     def set_zoom(self, zoom: int) -> None:
         self.zoom_label.setText(f"Zoom: {zoom}")
 
+    def set_project_explorer_visible(self, visible: bool) -> None:
+        self._set_side_panel_visible(self.left_panel, 0, visible)
+
+    def set_inspector_visible(self, visible: bool) -> None:
+        self._set_side_panel_visible(self.right_panel, 2, visible)
+
+    def is_project_explorer_visible(self) -> bool:
+        return self._project_explorer_visible
+
+    def is_inspector_visible(self) -> bool:
+        return self._inspector_visible
+
     def append_log(self, message: str) -> None:
         self.log_output.append(message)
 
@@ -593,6 +762,77 @@ class WorkspacePage(QWidget):
         if hasattr(self, "downsample_label"):
             self.downsample_label.setText(downsample_text)
 
+    def _set_side_panel_visible(self, panel: QWidget | None, index: int, visible: bool) -> None:
+        if panel is None or self.splitter is None:
+            return
+        current = self._project_explorer_visible if index == 0 else self._inspector_visible
+        if current == visible:
+            return
+        sizes = self.splitter.sizes()
+        if not visible and index < len(sizes) and sizes[index] > 32:
+            if index == 0:
+                self._left_panel_width = sizes[index]
+            elif index == 2:
+                self._right_panel_width = sizes[index]
+        if index == 0:
+            self._project_explorer_visible = visible
+        elif index == 2:
+            self._inspector_visible = visible
+        panel.setVisible(visible)
+        self._restore_splitter_sizes()
+        self._refresh_map_layout()
+        self._emit_side_panel_visibility(index, visible)
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        if self.splitter is None:
+            return
+        sizes = self.splitter.sizes()
+        if len(sizes) < 3:
+            return
+        self._sync_side_panel_visibility(0, sizes[0] > 24)
+        self._sync_side_panel_visibility(2, sizes[2] > 24)
+
+    def _sync_side_panel_visibility(self, index: int, visible: bool) -> None:
+        if index == 0:
+            if self._project_explorer_visible == visible:
+                if visible and self.splitter:
+                    self._left_panel_width = max(self.splitter.sizes()[0], self._left_panel_width)
+                return
+            self._project_explorer_visible = visible
+            if visible and self.splitter:
+                self._left_panel_width = max(self.splitter.sizes()[0], self._left_panel_width)
+        elif index == 2:
+            if self._inspector_visible == visible:
+                if visible and self.splitter:
+                    self._right_panel_width = max(self.splitter.sizes()[2], self._right_panel_width)
+                return
+            self._inspector_visible = visible
+            if visible and self.splitter:
+                self._right_panel_width = max(self.splitter.sizes()[2], self._right_panel_width)
+        else:
+            return
+        self._emit_side_panel_visibility(index, visible)
+        self._refresh_map_layout()
+
+    def _emit_side_panel_visibility(self, index: int, visible: bool) -> None:
+        if index == 0:
+            self.projectExplorerVisibilityChanged.emit(visible)
+        elif index == 2:
+            self.inspectorVisibilityChanged.emit(visible)
+
+    def _restore_splitter_sizes(self) -> None:
+        if self.splitter is None:
+            return
+        total = max(self.splitter.width(), sum(self.splitter.sizes()), 900)
+        left = self._left_panel_width if self.is_project_explorer_visible() else 0
+        right = self._right_panel_width if self.is_inspector_visible() else 0
+        center = max(420, total - left - right)
+        self.splitter.setSizes([left, center, right])
+
+    def _refresh_map_layout(self) -> None:
+        script = "if (typeof map !== 'undefined' && map) setTimeout(function() { map.invalidateSize(true); }, 60);"
+        QTimer.singleShot(80, lambda: self.map_view.page().runJavaScript(script))
+
     @staticmethod
     def _output_text(path: str) -> str:
         if not path:
@@ -601,6 +841,37 @@ class WorkspacePage(QWidget):
         if output_path.exists():
             return str(output_path)
         return f"Missing: {output_path}"
+
+    @staticmethod
+    def _export_display_parts(path_text: str) -> tuple[str, str]:
+        if path_text == "--":
+            return "No output folder", "Managed automatically"
+
+        prefix = ""
+        raw_path = path_text
+        if path_text.startswith("Missing: "):
+            prefix = "Missing: "
+            raw_path = path_text.removeprefix("Missing: ")
+
+        normalized = raw_path.replace("/", "\\")
+        parts = [part for part in normalized.split("\\") if part]
+        if not parts:
+            return f"{prefix}{raw_path}", ""
+
+        leaf = parts[-1]
+        parents = parts[:-1]
+        if not parents:
+            return f"{prefix}{leaf}", normalized
+
+        if len(parents) <= 2:
+            context = "\\".join(parents)
+        elif parents[0].endswith(":"):
+            context = f"{parents[0]}\\...\\{parents[-1]}"
+        elif normalized.startswith("\\\\") and len(parents) >= 3:
+            context = f"\\\\{parents[0]}\\{parents[1]}\\...\\{parents[-1]}"
+        else:
+            context = f"{parents[0]}\\...\\{parents[-1]}"
+        return f"{prefix}{leaf}", context
 
     @staticmethod
     def _asset_name(path: str) -> str:

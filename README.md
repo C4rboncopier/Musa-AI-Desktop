@@ -13,6 +13,8 @@ workflows.
 - Project-first workflow: create or open a project before importing datasets or
   running AI mapping.
 - SQLite metadata store at `.banana_mapper/banana_mapper.sqlite3` by default.
+- System-managed project outputs under `SystemOutput/<project-name>_<project-id>/`.
+- Per-project GeoTIFF preview cache under each project's `cache/geotiff/` folder.
 - Filepath-only persistence: GeoTIFFs, drone images, model weights, and exports
   remain on the local filesystem.
 - Automatic missing-path validation for linked assets, AI models, exports, and
@@ -32,8 +34,9 @@ workflows.
   dialogs, and status messages.
 - Heatmap rendering has been removed. AI visualization now focuses on GeoTIFF
   overlays, point-based detection markers, and layer visibility controls.
-- AI mapping asks for an output folder for each run and writes downloadable
-  JSON, CSV, and Excel `.xlsx` result files there.
+- AI mapping automatically writes each run into the project's managed output
+  folder, with JSON, CSV, and Excel `.xlsx` result files available in the
+  project Output Manager.
 
 ## Setup
 
@@ -61,12 +64,11 @@ internet connection.
    project record.
 3. Use **Manage Models** to choose preferred AI model weights, or link models
    inside a specific project.
-4. Link a stitched GeoTIFF, drone image folder, AI model weights, and export
-   folder.
+4. Link a stitched GeoTIFF, drone image folder, and AI model weights.
 5. Import the GeoTIFF to render it on the GIS map.
 6. Run AI Mapping from either the linked image folder or the current GeoTIFF.
-   Choose the folder where JSON, CSV, and Excel results should be saved.
-7. Review point layers, counts, metadata, and logs in the project workspace.
+   Outputs are routed automatically to the project's managed folder.
+7. Review point layers, counts, metadata, outputs, and logs in the project workspace.
 
 When a project is opened again, Musa AI automatically reloads its linked
 GeoTIFF if the filepath still exists and restores the latest saved JSON/CSV
@@ -82,3 +84,7 @@ The SQLite database stores only metadata:
 - Detection result summaries and exported JSON/CSV paths
 
 It does not store image binaries, GeoTIFF binaries, or AI model weights.
+Generated result files are stored on disk in the system-managed `SystemOutput`
+folder and are intentionally excluded from Git.
+Reusable GeoTIFF preview caches are stored per project, not in a shared app
+cache, so each project remains isolated and portable.

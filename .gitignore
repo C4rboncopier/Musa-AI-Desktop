@@ -29,6 +29,7 @@ test output/
 outputs/
 output/
 exports/
+SystemOutput/
 *.pt
 *.onnx
 *.engine
