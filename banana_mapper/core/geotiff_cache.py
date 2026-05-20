@@ -7,7 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..geotiff import GeoTiffInfo
+from ..geotiff import GeoTiffInfo, GeoTiffTileLevel
 
 
 @dataclass(frozen=True)
@@ -73,16 +73,33 @@ class GeoTiffSessionCache:
         for path in self.cache_dir.iterdir():
             if path.is_file():
                 path.unlink(missing_ok=True)
+            elif path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
 
     def _load_from_disk(self, key: GeoTiffCacheKey) -> GeoTiffInfo | None:
         if self.cache_dir is None:
             return None
-        metadata_path = self.cache_dir / f"{self._cache_stem(key)}.json"
-        preview_path = self.cache_dir / f"{self._cache_stem(key)}.png"
+        stem = self._cache_stem(key)
+        metadata_path = self.cache_dir / f"{stem}.json"
+        preview_path = self.cache_dir / f"{stem}.png"
+        tile_dir = self.cache_dir / f"{stem}_tiles"
         if not metadata_path.exists() or not preview_path.exists():
             return None
         try:
             payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            tile_levels = tuple(
+                GeoTiffTileLevel(
+                    index=int(level["index"]),
+                    width=int(level["width"]),
+                    height=int(level["height"]),
+                    cols=int(level["cols"]),
+                    rows=int(level["rows"]),
+                    scale=int(level["scale"]),
+                )
+                for level in payload.get("tile_levels", [])
+            )
+            if not tile_levels or not tile_dir.exists():
+                return None
             if (
                 Path(payload["file_path"]).resolve(strict=True) != key.path
                 or int(payload["max_preview_pixels"]) != key.max_preview_pixels
@@ -105,6 +122,9 @@ class GeoTiffSessionCache:
                 preview_path=preview_path,
                 preview_width=int(payload["preview_width"]),
                 preview_height=int(payload["preview_height"]),
+                tile_dir=tile_dir,
+                tile_size=int(payload.get("tile_size", 512)),
+                tile_levels=tile_levels,
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
@@ -115,9 +135,15 @@ class GeoTiffSessionCache:
         stem = self._cache_stem(key)
         preview_path = self.cache_dir / f"{stem}.png"
         metadata_path = self.cache_dir / f"{stem}.json"
+        tile_dir = self.cache_dir / f"{stem}_tiles"
         try:
             if info.preview_path.resolve() != preview_path.resolve():
                 shutil.copy2(info.preview_path, preview_path)
+            if info.tile_dir is not None and info.tile_dir.exists():
+                if info.tile_dir.resolve() != tile_dir.resolve():
+                    if tile_dir.exists():
+                        shutil.rmtree(tile_dir, ignore_errors=True)
+                    shutil.copytree(info.tile_dir, tile_dir)
             payload = {
                 "file_path": str(key.path),
                 "file_name": info.file_name,
@@ -132,6 +158,18 @@ class GeoTiffSessionCache:
                 "bounds_wgs84": list(info.bounds_wgs84),
                 "preview_width": info.preview_width,
                 "preview_height": info.preview_height,
+                "tile_size": info.tile_size,
+                "tile_levels": [
+                    {
+                        "index": level.index,
+                        "width": level.width,
+                        "height": level.height,
+                        "cols": level.cols,
+                        "rows": level.rows,
+                        "scale": level.scale,
+                    }
+                    for level in info.tile_levels
+                ],
                 "max_preview_pixels": key.max_preview_pixels,
                 "mtime_ns": key.mtime_ns,
                 "size": key.size,

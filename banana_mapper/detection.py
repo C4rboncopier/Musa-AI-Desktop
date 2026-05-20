@@ -143,6 +143,7 @@ def run_funnel_mapping(
     slice_overlap: int = 96,
     nms_iou_threshold: float = 0.45,
     duplicate_distance_m: float = 0.5,
+    device: str | int | None = None,
     progress_callback: _ProgressCb = None,
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> MappingResult:
@@ -213,11 +214,13 @@ def run_funnel_mapping(
                 leaf_model, image_path,
                 slice_size=slice_size, overlap=slice_overlap,
                 conf=confidence, iou_threshold=nms_iou_threshold,
+                device=device,
             )
             diseases = _sahi_disease_inference(
                 disease_model, image_path,
                 slice_size=slice_size, overlap=slice_overlap,
                 conf=confidence, iou_threshold=nms_iou_threshold,
+                device=device,
             )
         except Exception as exc:
             skipped_images += 1
@@ -259,6 +262,7 @@ def run_funnel_mapping_geotiff(
     slice_overlap: int = 96,
     nms_iou_threshold: float = 0.45,
     duplicate_distance_m: float = 0.5,
+    device: str | int | None = None,
     progress_callback: _ProgressCb = None,
     should_stop: Optional[Callable[[], bool]] = None,
     scan_callback: Optional[Callable[[float, float, float, float], None]] = None,
@@ -356,10 +360,22 @@ def run_funnel_mapping_geotiff(
 
             # Run inference
             try:
-                leaf_result = leaf_model.predict(source=tile_img, imgsz=slice_size, conf=confidence, verbose=False)[0]
+                leaf_result = leaf_model.predict(
+                    source=tile_img,
+                    imgsz=slice_size,
+                    conf=confidence,
+                    verbose=False,
+                    device=device,
+                )[0]
                 leaves = _parse_leaf_predictions(leaf_result)
                 
-                disease_result = disease_model.predict(source=tile_img, imgsz=slice_size, conf=confidence, verbose=False)[0]
+                disease_result = disease_model.predict(
+                    source=tile_img,
+                    imgsz=slice_size,
+                    conf=confidence,
+                    verbose=False,
+                    device=device,
+                )[0]
                 diseases = _parse_disease_predictions(disease_result)
             except Exception as exc:
                 warnings.append(f"Inference failed on tile {index}: {exc}")
@@ -1336,6 +1352,7 @@ def _sahi_leaf_inference(
     overlap: int = 96,
     conf: float = 0.5,
     iou_threshold: float = 0.45,
+    device: str | int | None = None,
 ) -> list[_LeafPrediction]:
     """Run the leaf segmentation model on overlapping tiles and merge results."""
     img = Image.open(image_path)
@@ -1347,7 +1364,7 @@ def _sahi_leaf_inference(
     for x0, y0, x1, y1 in tiles:
         tile = img_np[y0:y1, x0:x1]
         result = model.predict(
-            source=tile, imgsz=slice_size, conf=conf, verbose=False,
+            source=tile, imgsz=slice_size, conf=conf, verbose=False, device=device,
         )[0]
         leaves = _parse_leaf_predictions(result)
         # Offset tile-local coordinates back to full-image space
@@ -1371,6 +1388,7 @@ def _sahi_disease_inference(
     overlap: int = 96,
     conf: float = 0.5,
     iou_threshold: float = 0.45,
+    device: str | int | None = None,
 ) -> list[_DiseasePrediction]:
     """Run the disease detection model on overlapping tiles and merge results."""
     img = Image.open(image_path)
@@ -1382,7 +1400,7 @@ def _sahi_disease_inference(
     for x0, y0, x1, y1 in tiles:
         tile = img_np[y0:y1, x0:x1]
         result = model.predict(
-            source=tile, imgsz=slice_size, conf=conf, verbose=False,
+            source=tile, imgsz=slice_size, conf=conf, verbose=False, device=device,
         )[0]
         diseases = _parse_disease_predictions(result)
         # Offset tile-local coordinates back to full-image space

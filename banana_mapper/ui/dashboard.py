@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.models import ProjectBundle
-from .widgets import EmptyState, MetricCard, StatusPill, card
+from .widgets import EmptyState, MetricCard, StatusPill
 
 
 class ProjectListHeader(QFrame):
@@ -131,7 +131,6 @@ class DashboardPage(QWidget):
     refreshRequested = pyqtSignal()
     settingsRequested = pyqtSignal()
     modelManagerRequested = pyqtSignal()
-    datasetManagerRequested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -159,23 +158,17 @@ class DashboardPage(QWidget):
         rail_layout.addSpacing(18)
 
         self.new_btn = self._nav_button("New Project", primary=True)
-        self.open_btn = self._nav_button("Open Selected")
         self.models_btn = self._nav_button("AI Models")
-        self.datasets_btn = self._nav_button("Datasets")
         self.settings_btn = self._nav_button("Settings")
         self.refresh_btn = self._nav_button("Refresh")
         rail_layout.addWidget(self.new_btn)
-        rail_layout.addWidget(self.open_btn)
         rail_layout.addWidget(self.models_btn)
-        rail_layout.addWidget(self.datasets_btn)
         rail_layout.addWidget(self.settings_btn)
         rail_layout.addStretch(1)
         rail_layout.addWidget(self.refresh_btn)
 
         self.new_btn.clicked.connect(lambda _=False: self.createRequested.emit())
-        self.open_btn.clicked.connect(lambda _=False: self._open_first_project())
         self.models_btn.clicked.connect(lambda _=False: self.modelManagerRequested.emit())
-        self.datasets_btn.clicked.connect(lambda _=False: self.datasetManagerRequested.emit())
         self.settings_btn.clicked.connect(lambda _=False: self.settingsRequested.emit())
         self.refresh_btn.clicked.connect(lambda _=False: self.refreshRequested.emit())
 
@@ -212,24 +205,6 @@ class DashboardPage(QWidget):
         for metric in [self.project_metric, self.asset_metric, self.result_metric, self.missing_metric]:
             metrics.addWidget(metric)
         content_layout.addLayout(metrics)
-
-        quick = card("Quick Actions")
-        quick_layout = quick.layout()
-        quick_row = QHBoxLayout()
-        quick_row.setSpacing(10)
-        for text, signal in [
-            ("Create Project", self.createRequested),
-            ("Manage Models", self.modelManagerRequested),
-            ("Manage Datasets", self.datasetManagerRequested),
-            ("Preferences", self.settingsRequested),
-        ]:
-            btn = QPushButton(text)
-            btn.setObjectName("secondaryButton")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, sig=signal: sig.emit())
-            quick_row.addWidget(btn)
-        quick_layout.addLayout(quick_row)
-        content_layout.addWidget(quick)
 
         projects_header = QHBoxLayout()
         projects_title = QLabel("Recent Projects")
@@ -297,10 +272,6 @@ class DashboardPage(QWidget):
             row_widget.deleteRequested.connect(self.projectDeleteRequested.emit)
             self.project_list.addWidget(row_widget)
         self.project_list.addStretch(1)
-
-    def _open_first_project(self) -> None:
-        if self._bundles:
-            self.projectOpenRequested.emit(self._bundles[0].project.id)
 
     @staticmethod
     def _nav_button(text: str, primary: bool = False) -> QPushButton:

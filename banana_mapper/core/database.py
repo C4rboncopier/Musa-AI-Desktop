@@ -361,6 +361,15 @@ class ProjectRepository:
             ).fetchall()
         return [self._model_from_row(row) for row in rows]
 
+    def remove_model(self, project_id: str, role: str) -> None:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM ai_models WHERE project_id = ? AND role = ?",
+                (project_id, role),
+            )
+            conn.execute("UPDATE projects SET modified_at = ? WHERE id = ?", (now, project_id))
+
     def save_analysis_result(
         self,
         project_id: str,
@@ -402,6 +411,15 @@ class ProjectRepository:
                 (project_id,),
             ).fetchall()
         return [self._result_from_row(row) for row in rows]
+
+    def remove_analysis_result(self, project_id: str, result_id: int) -> None:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM analysis_results WHERE project_id = ? AND id = ?",
+                (project_id, result_id),
+            )
+            conn.execute("UPDATE projects SET modified_at = ? WHERE id = ?", (now, project_id))
 
     def set_config(self, project_id: str, key: str, value: Any) -> None:
         now = utc_now_iso()
@@ -502,8 +520,12 @@ class ProjectRepository:
     def _result_from_row(self, row: sqlite3.Row) -> AnalysisResultRecord:
         json_path = row["json_path"]
         csv_path = row["csv_path"]
+        summary = _loads(row["summary_json"], {})
+        xlsx_path = str(summary.get("xlsx_path", "") or "")
         exists = bool(json_path and Path(json_path).exists()) and (
             not csv_path or Path(csv_path).exists()
+        ) and (
+            not xlsx_path or Path(xlsx_path).exists()
         )
         return AnalysisResultRecord(
             id=int(row["id"]),
@@ -511,7 +533,7 @@ class ProjectRepository:
             result_type=row["result_type"],
             json_path=json_path,
             csv_path=csv_path,
-            summary=_loads(row["summary_json"], {}),
+            summary=summary,
             created_at=row["created_at"],
             exists=exists,
         )

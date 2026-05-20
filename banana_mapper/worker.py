@@ -11,7 +11,7 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .detection import MappingResult, run_funnel_mapping, run_funnel_mapping_geotiff
-from .geotiff import GeoTiffError, GeoTiffInfo, load_geotiff_for_leaflet
+from .geotiff import DEFAULT_MAX_PREVIEW_PIXELS, GeoTiffError, GeoTiffInfo, load_geotiff_for_leaflet
 
 
 class GeoTiffCancelled(RuntimeError):
@@ -34,7 +34,12 @@ class GeoTiffWorker(QThread):
     finished: pyqtSignal = pyqtSignal(object)   # GeoTiffInfo
     failed: pyqtSignal = pyqtSignal(str)
 
-    def __init__(self, path: str | Path, max_preview_pixels: int = 200_000_000, parent=None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        max_preview_pixels: int = DEFAULT_MAX_PREVIEW_PIXELS,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._path = path
         self._max_preview_pixels = max_preview_pixels
@@ -75,6 +80,7 @@ class AiMappingWorker(QThread):
         leaf_model_path: str | Path,
         disease_model_path: str | Path,
         output_dir: str | Path | None = None,
+        device: str | int | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -82,6 +88,7 @@ class AiMappingWorker(QThread):
         self._leaf_model_path = leaf_model_path
         self._disease_model_path = disease_model_path
         self._output_dir = output_dir
+        self._device = device
 
     def run(self) -> None:
         try:
@@ -90,6 +97,7 @@ class AiMappingWorker(QThread):
                 self._leaf_model_path,
                 self._disease_model_path,
                 output_dir=self._output_dir,
+                device=self._device,
                 progress_callback=self._on_progress,
                 should_stop=self.isInterruptionRequested,
             )
@@ -115,6 +123,7 @@ class AiGeotiffMappingWorker(QThread):
         leaf_model_path: str | Path,
         disease_model_path: str | Path,
         output_dir: str | Path | None = None,
+        device: str | int | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -122,6 +131,7 @@ class AiGeotiffMappingWorker(QThread):
         self._leaf_model_path = leaf_model_path
         self._disease_model_path = disease_model_path
         self._output_dir = output_dir
+        self._device = device
 
     def run(self) -> None:
         try:
@@ -130,6 +140,7 @@ class AiGeotiffMappingWorker(QThread):
                 self._leaf_model_path,
                 self._disease_model_path,
                 output_dir=self._output_dir,
+                device=self._device,
                 progress_callback=self._on_progress,
                 should_stop=self.isInterruptionRequested,
                 scan_callback=self._on_scan,

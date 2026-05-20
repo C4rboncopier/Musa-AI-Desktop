@@ -127,6 +127,12 @@
       height: 10px;
       width: 16px;
     }
+    .geotiff-image-overlay,
+    .geotiff-image-tile {
+      backface-visibility: hidden;
+      image-rendering: auto;
+      will-change: transform, opacity;
+    }
   </style>
 </head>
 <body>
@@ -196,6 +202,7 @@
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 25,
       maxNativeZoom: 19,
+      keepBuffer: 4,
       crossOrigin: true,
       attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
@@ -260,6 +267,183 @@
     }
   }
 
+  var GeoTiffTileOverlay = null;
+  if (typeof L !== "undefined") {
+  GeoTiffTileOverlay = L.Layer.extend({
+    initialize: function(tileSet, bounds, options) {
+      L.setOptions(this, options);
+      this._tileSet = tileSet || {};
+      this._bounds = bounds;
+      this._tileSize = Number(this._tileSet.tileSize || this.options.tileSize || 512);
+      this._baseUrl = this._tileSet.baseUrl || "";
+      this._levels = (this._tileSet.levels || []).slice().sort(function(a, b) {
+        return (a.width * a.height) - (b.width * b.height);
+      });
+      this._tiles = {};
+      this._resetFrame = null;
+    },
+
+    onAdd: function(mapInstance) {
+      this._map = mapInstance;
+      this._map.on("moveend zoomend resize", this._scheduleReset, this);
+      this._scheduleReset();
+    },
+
+    onRemove: function() {
+      if (this._resetFrame) {
+        L.Util.cancelAnimFrame(this._resetFrame);
+        this._resetFrame = null;
+      }
+      if (this._map) {
+        this._map.off("moveend zoomend resize", this._scheduleReset, this);
+      }
+      this._removeAllTiles();
+      this._map = null;
+    },
+
+    setOpacity: function(opacity) {
+      this.options.opacity = opacity;
+      Object.keys(this._tiles).forEach(function(key) {
+        this._tiles[key].setOpacity(opacity);
+      }, this);
+      return this;
+    },
+
+    _scheduleReset: function() {
+      if (!this._map) return;
+      if (this._resetFrame) L.Util.cancelAnimFrame(this._resetFrame);
+      this._resetFrame = L.Util.requestAnimFrame(this._reset, this);
+    },
+
+    _reset: function() {
+      this._resetFrame = null;
+      if (!this._map || !this._levels.length || !this._baseUrl) {
+        this._removeAllTiles();
+        return;
+      }
+
+      var intersection = this._viewIntersection();
+      if (!intersection) {
+        this._removeAllTiles();
+        return;
+      }
+
+      var level = this._selectLevel();
+      var range = this._tileRange(level, intersection);
+      if (!range) {
+        this._removeAllTiles();
+        return;
+      }
+
+      var wanted = {};
+      for (var y = range.y0; y <= range.y1; y++) {
+        for (var x = range.x0; x <= range.x1; x++) {
+          var key = level.index + ":" + x + ":" + y;
+          wanted[key] = true;
+          if (!this._tiles[key]) this._addTile(level, x, y, key);
+        }
+      }
+      this._pruneTiles(wanted);
+    },
+
+    _selectLevel: function() {
+      var nw = this._map.latLngToLayerPoint(this._bounds.getNorthWest());
+      var se = this._map.latLngToLayerPoint(this._bounds.getSouthEast());
+      var displayWidth = Math.max(1, Math.abs(se.x - nw.x));
+      var displayHeight = Math.max(1, Math.abs(se.y - nw.y));
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var targetWidth = displayWidth * dpr * 1.15;
+      var targetHeight = displayHeight * dpr * 1.15;
+      for (var i = 0; i < this._levels.length; i++) {
+        var level = this._levels[i];
+        if (level.width >= targetWidth && level.height >= targetHeight) {
+          return level;
+        }
+      }
+      return this._levels[this._levels.length - 1];
+    },
+
+    _viewIntersection: function() {
+      var view = this._map.getBounds().pad(0.15);
+      var west = Math.max(this._bounds.getWest(), view.getWest());
+      var east = Math.min(this._bounds.getEast(), view.getEast());
+      var south = Math.max(this._bounds.getSouth(), view.getSouth());
+      var north = Math.min(this._bounds.getNorth(), view.getNorth());
+      if (west >= east || south >= north) return null;
+      return { west: west, east: east, south: south, north: north };
+    },
+
+    _tileRange: function(level, intersection) {
+      var lngSpan = this._bounds.getEast() - this._bounds.getWest();
+      var latSpan = this._bounds.getNorth() - this._bounds.getSouth();
+      if (lngSpan <= 0 || latSpan <= 0) return null;
+
+      var leftPx = clamp(Math.floor((intersection.west - this._bounds.getWest()) / lngSpan * level.width), 0, level.width - 1);
+      var rightPx = clamp(Math.ceil((intersection.east - this._bounds.getWest()) / lngSpan * level.width), 1, level.width);
+      var topPx = clamp(Math.floor((this._bounds.getNorth() - intersection.north) / latSpan * level.height), 0, level.height - 1);
+      var bottomPx = clamp(Math.ceil((this._bounds.getNorth() - intersection.south) / latSpan * level.height), 1, level.height);
+      if (rightPx <= leftPx || bottomPx <= topPx) return null;
+
+      return {
+        x0: clamp(Math.floor(leftPx / this._tileSize), 0, level.cols - 1),
+        x1: clamp(Math.floor((rightPx - 1) / this._tileSize), 0, level.cols - 1),
+        y0: clamp(Math.floor(topPx / this._tileSize), 0, level.rows - 1),
+        y1: clamp(Math.floor((bottomPx - 1) / this._tileSize), 0, level.rows - 1)
+      };
+    },
+
+    _addTile: function(level, x, y, key) {
+      var url = this._baseUrl + level.index + "/" + x + "_" + y + ".png";
+      var layer = L.imageOverlay(url, this._tileBounds(level, x, y), {
+        opacity: this.options.opacity,
+        interactive: false,
+        crossOrigin: false,
+        zIndex: this.options.zIndex || 300,
+        pane: this.options.pane,
+        className: "geotiff-image-tile"
+      }).addTo(this._map);
+      this._tiles[key] = layer;
+    },
+
+    _tileBounds: function(level, x, y) {
+      var left = x * this._tileSize;
+      var top = y * this._tileSize;
+      var right = Math.min(left + this._tileSize, level.width);
+      var bottom = Math.min(top + this._tileSize, level.height);
+      var lngSpan = this._bounds.getEast() - this._bounds.getWest();
+      var latSpan = this._bounds.getNorth() - this._bounds.getSouth();
+      var west = this._bounds.getWest() + (left / level.width) * lngSpan;
+      var east = this._bounds.getWest() + (right / level.width) * lngSpan;
+      var north = this._bounds.getNorth() - (top / level.height) * latSpan;
+      var south = this._bounds.getNorth() - (bottom / level.height) * latSpan;
+      return L.latLngBounds([south, west], [north, east]);
+    },
+
+    _pruneTiles: function(wanted) {
+      Object.keys(this._tiles).forEach(function(key) {
+        if (wanted[key]) return;
+        this._map.removeLayer(this._tiles[key]);
+        delete this._tiles[key];
+      }, this);
+    },
+
+    _removeAllTiles: function() {
+      if (!this._map) {
+        this._tiles = {};
+        return;
+      }
+      Object.keys(this._tiles).forEach(function(key) {
+        this._map.removeLayer(this._tiles[key]);
+      }, this);
+      this._tiles = {};
+    }
+  });
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
   function setOverlay(payload) {
     if (!mapReady) { pendingOverlay = payload; return; }
     clearOverlay();
@@ -267,13 +451,22 @@
       [payload.bounds.south, payload.bounds.west],
       [payload.bounds.north, payload.bounds.east]
     );
-    imageOverlay = L.imageOverlay(payload.imageUrl, currentBounds, {
-      opacity: overlayVisible ? overlayOpacity : 0,
-      interactive: false,
-      crossOrigin: false,
-      zIndex: 300,
-      pane: "geotiffPane"
-    }).addTo(map);
+    if (GeoTiffTileOverlay && payload.tiles && payload.tiles.baseUrl && payload.tiles.levels && payload.tiles.levels.length) {
+      imageOverlay = new GeoTiffTileOverlay(payload.tiles, currentBounds, {
+        opacity: overlayVisible ? overlayOpacity : 0,
+        zIndex: 300,
+        pane: "geotiffPane"
+      }).addTo(map);
+    } else {
+      imageOverlay = L.imageOverlay(payload.imageUrl, currentBounds, {
+        opacity: overlayVisible ? overlayOpacity : 0,
+        interactive: false,
+        crossOrigin: false,
+        zIndex: 300,
+        pane: "geotiffPane",
+        className: "geotiff-image-overlay"
+      }).addTo(map);
+    }
     extentRectangle = L.rectangle(currentBounds, {
       color: currentExtentColor,
       weight: 2,

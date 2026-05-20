@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, mkdtemp
 from typing import Callable, Optional
 
 import numpy as np
@@ -17,10 +17,22 @@ from rasterio.warp import calculate_default_transform, reproject, transform_boun
 
 
 WGS84 = "EPSG:4326"
+DEFAULT_MAX_PREVIEW_PIXELS = 65_000_000
+DEFAULT_TILE_SIZE = 512
 
 
 class GeoTiffError(RuntimeError):
     """Raised when a GeoTIFF cannot be prepared for map overlay."""
+
+
+@dataclass(frozen=True)
+class GeoTiffTileLevel:
+    index: int
+    width: int
+    height: int
+    cols: int
+    rows: int
+    scale: int
 
 
 @dataclass(frozen=True)
@@ -39,6 +51,9 @@ class GeoTiffInfo:
     preview_path: Path
     preview_width: int
     preview_height: int
+    tile_dir: Path | None = None
+    tile_size: int = DEFAULT_TILE_SIZE
+    tile_levels: tuple[GeoTiffTileLevel, ...] = ()
 
     @property
     def west(self) -> float:
@@ -92,6 +107,7 @@ _STAGES = [
     (80, "Reprojecting bands to RGBA (this may take a moment)..."),
     (90, "Finalizing spatial extent..."),
     (96, "Saving preview image to disk..."),
+    (98, "Building tiled preview pyramid for smooth zoom..."),
     (100, "Done."),
 ]
 
@@ -105,7 +121,7 @@ def _report(cb: _ProgressCb, percent: int, message: str) -> None:
 
 def load_geotiff_for_leaflet(
     path: str | Path,
-    max_preview_pixels: int = 200_000_000,  # ~200 MP – preserve detail for deep zoom
+    max_preview_pixels: int = DEFAULT_MAX_PREVIEW_PIXELS,
     progress_callback: _ProgressCb = None,
 ) -> GeoTiffInfo:
     """Read a GeoTIFF and export a map-ready EPSG:4326 PNG preview.
@@ -167,7 +183,15 @@ def load_geotiff_for_leaflet(
                 exact_bounds_wgs84 = bounds_wgs84
 
             _report(cb, 96, "Saving preview image to disk...")
-            preview_path = _save_preview_png(rgba, file_path.stem)
+            preview_image = Image.fromarray(rgba, mode="RGBA")
+            preview_path = _save_preview_png(preview_image, file_path.stem)
+
+            _report(cb, 98, "Building tiled preview pyramid for smooth zoom...")
+            tile_dir, tile_levels = _save_preview_tiles(
+                preview_image,
+                file_path.stem,
+                progress_callback=cb,
+            )
 
             _report(cb, 100, "Done.")
             return GeoTiffInfo(
@@ -185,6 +209,9 @@ def load_geotiff_for_leaflet(
                 preview_path=preview_path,
                 preview_width=dst_width,
                 preview_height=dst_height,
+                tile_dir=tile_dir,
+                tile_size=DEFAULT_TILE_SIZE,
+                tile_levels=tile_levels,
             )
     except RasterioIOError as exc:
         raise GeoTiffError("The selected file is not a readable GeoTIFF.") from exc
@@ -335,12 +362,69 @@ def _normalize_rgb(color: np.ndarray) -> np.ndarray:
     return np.moveaxis(output, 0, -1)
 
 
-def _save_preview_png(rgba: np.ndarray, stem: str) -> Path:
-    safe_stem = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem)[:48]
+def _safe_stem(stem: str) -> str:
+    return "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem)[:48]
+
+
+def _save_preview_png(image: Image.Image, stem: str) -> Path:
+    safe_stem = _safe_stem(stem)
     temp = NamedTemporaryFile(prefix=f"banana_mapper_{safe_stem}_", suffix=".png", delete=False)
     temp.close()
-    Image.fromarray(rgba, mode="RGBA").save(temp.name, optimize=True)
+    image.save(temp.name, compress_level=1)
     return Path(temp.name)
+
+
+def _save_preview_tiles(
+    image: Image.Image,
+    stem: str,
+    tile_size: int = DEFAULT_TILE_SIZE,
+    progress_callback: _ProgressCb = None,
+) -> tuple[Path, tuple[GeoTiffTileLevel, ...]]:
+    safe_stem = _safe_stem(stem)
+    tile_dir = Path(mkdtemp(prefix=f"banana_mapper_{safe_stem}_tiles_"))
+    levels: list[GeoTiffTileLevel] = []
+    current = image
+    scale = 1
+    level_index = 0
+
+    while True:
+        _report(
+            progress_callback,
+            98,
+            f"Building preview tiles level {level_index + 1} ({current.width:,} x {current.height:,} px)...",
+        )
+        level_dir = tile_dir / str(level_index)
+        level_dir.mkdir(parents=True, exist_ok=True)
+        cols = max(1, (current.width + tile_size - 1) // tile_size)
+        rows = max(1, (current.height + tile_size - 1) // tile_size)
+        for row in range(rows):
+            top = row * tile_size
+            bottom = min(top + tile_size, current.height)
+            for col in range(cols):
+                left = col * tile_size
+                right = min(left + tile_size, current.width)
+                tile = current.crop((left, top, right, bottom))
+                tile.save(level_dir / f"{col}_{row}.png", compress_level=1)
+
+        levels.append(
+            GeoTiffTileLevel(
+                index=level_index,
+                width=current.width,
+                height=current.height,
+                cols=cols,
+                rows=rows,
+                scale=scale,
+            )
+        )
+        if current.width <= tile_size and current.height <= tile_size:
+            break
+
+        next_size = (max(1, (current.width + 1) // 2), max(1, (current.height + 1) // 2))
+        current = current.resize(next_size, Image.Resampling.BILINEAR)
+        scale *= 2
+        level_index += 1
+
+    return tile_dir, tuple(levels)
 
 
 def _normalize_bounds(west: float, south: float, east: float, north: float) -> tuple[float, float, float, float]:

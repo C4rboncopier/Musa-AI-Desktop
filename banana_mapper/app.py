@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, QUrl
+_WEB_ENGINE_GPU_FLAGS = (
+    "--ignore-gpu-blocklist",
+    "--enable-gpu-rasterization",
+    "--enable-zero-copy",
+    "--enable-native-gpu-memory-buffers",
+    "--enable-accelerated-2d-canvas",
+)
+
+
+def _configure_web_engine_gpu() -> None:
+    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    tokens = current.split()
+    for flag in _WEB_ENGINE_GPU_FLAGS:
+        if flag not in tokens:
+            tokens.append(flag)
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(tokens)
+
+
+_configure_web_engine_gpu()
+
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QAction, QDesktopServices, QFont
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import (
@@ -25,11 +46,13 @@ from .core.models import ProjectBundle
 from .core.output_manager import ProjectOutputManager
 from .detection import DetectionRecord, MappingResult
 from .geotiff import GeoTiffInfo
+from .hardware import NVIDIA_DRIVER_URL, PYTORCH_SETUP_URL, HardwareStatus, detect_hardware, inference_device_arg
 from .loading_dialog import LoadingDialog
 from .map_bridge import MapBridge
 from .themes import DEFAULT_THEME, THEMES, generate_stylesheet
 from .ui.dashboard import DashboardPage
 from .ui.dialogs import EditProjectDialog, NewProjectDialog, PreferredModelsDialog
+from .ui.settings import SettingsPage
 from .ui.workspace import WorkspacePage
 from .worker import AiGeotiffMappingWorker, AiMappingWorker, GeoTiffWorker
 
@@ -45,6 +68,8 @@ class MainWindow(QMainWindow):
 
         self.repo = ProjectRepository()
         self.output_manager = ProjectOutputManager()
+        self.hardware_status: HardwareStatus = detect_hardware()
+        self.processing_device_preference = self._initial_processing_device_preference()
         self.current_bundle: ProjectBundle | None = None
         self.current_geotiff: GeoTiffInfo | None = None
         self.latest_mapping_result: MappingResult | None = None
@@ -61,6 +86,8 @@ class MainWindow(QMainWindow):
         self._loading_dialog: LoadingDialog | None = None
         self._mapping_dialog: LoadingDialog | None = None
         self._project_open_dialog: LoadingDialog | None = None
+        self._integrity_timer = QTimer(self)
+        self._startup_hardware_warning_shown = False
         self._current_theme_name = self.repo.get_preference("theme", DEFAULT_THEME)
         if self._current_theme_name not in THEMES:
             self._current_theme_name = DEFAULT_THEME
@@ -75,8 +102,11 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._apply_theme(self._current_theme_name)
         self._ensure_all_project_output_dirs()
+        self._update_settings_page()
         self.refresh_dashboard()
         self.workspace.load_map()
+        self._start_integrity_monitor()
+        QTimer.singleShot(900, self._show_startup_hardware_warning_if_needed)
 
     # ------------------------------------------------------------------
     # Setup
@@ -90,6 +120,10 @@ class MainWindow(QMainWindow):
         self.dashboard_action = QAction("Dashboard", self)
         self.dashboard_action.setShortcut("Ctrl+D")
         self.dashboard_action.triggered.connect(self.show_dashboard)
+
+        self.settings_action = QAction("Settings", self)
+        self.settings_action.setShortcut("Ctrl+,")
+        self.settings_action.triggered.connect(self.show_settings)
 
         self.fit_action = QAction("Fit to Orthomosaic", self)
         self.fit_action.setShortcut("Ctrl+F")
@@ -109,6 +143,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.new_project_action)
         file_menu.addAction(self.dashboard_action)
+        file_menu.addAction(self.settings_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
@@ -131,9 +166,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget(self)
         self.dashboard = DashboardPage()
         self.workspace = WorkspacePage()
+        self.settings = SettingsPage()
         self.workspace.set_web_channel(self.web_channel)
         self.stack.addWidget(self.dashboard)
         self.stack.addWidget(self.workspace)
+        self.stack.addWidget(self.settings)
         self.setCentralWidget(self.stack)
 
     def _build_status_bar(self) -> None:
@@ -155,7 +192,19 @@ class MainWindow(QMainWindow):
         self.dashboard.refreshRequested.connect(self.refresh_dashboard)
         self.dashboard.settingsRequested.connect(self.show_settings)
         self.dashboard.modelManagerRequested.connect(self.open_model_manager)
-        self.dashboard.datasetManagerRequested.connect(self.open_dataset_manager)
+
+        self.settings.backRequested.connect(self.show_dashboard)
+        self.settings.devicePreferenceChanged.connect(self._set_processing_device_preference)
+        self.settings.refreshHardwareRequested.connect(self.refresh_hardware_status)
+        self.settings.openPytorchGuideRequested.connect(lambda: QDesktopServices.openUrl(QUrl(PYTORCH_SETUP_URL)))
+        self.settings.openNvidiaDriverRequested.connect(lambda: QDesktopServices.openUrl(QUrl(NVIDIA_DRIVER_URL)))
+        self.settings.clearCacheRequested.connect(self.clear_project_cache)
+        self.settings.openOutputRootRequested.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_manager.root_dir)))
+        )
+        self.settings.openDatabaseFolderRequested.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.repo.db_path.parent)))
+        )
 
         self.workspace.backRequested.connect(self.show_dashboard)
         self.workspace.importGeoTiffRequested.connect(self.open_geotiff)
@@ -180,7 +229,6 @@ class MainWindow(QMainWindow):
         self.workspace.outputOpenRequested.connect(self.open_output_file)
         self.workspace.outputRevealRequested.connect(self.reveal_output_file)
         self.workspace.outputExportRequested.connect(self.export_output_file)
-        self.workspace.outputCopyPathRequested.connect(self.copy_output_path)
         self.workspace.outputDeleteRequested.connect(self.delete_output_file)
         self.project_explorer_action.toggled.connect(self.workspace.set_project_explorer_visible)
         self.inspector_action.toggled.connect(self.workspace.set_inspector_visible)
@@ -194,6 +242,82 @@ class MainWindow(QMainWindow):
         self.bridge.coordinatesChanged.connect(self._update_coordinates)
         self.bridge.zoomChanged.connect(self._update_zoom)
         self.bridge.mapReady.connect(self._handle_map_ready)
+
+    def _initial_processing_device_preference(self) -> str:
+        saved = str(self.repo.get_preference("processing_device", "") or "")
+        if saved in {"cpu", "gpu"}:
+            if saved == "gpu" and not self.hardware_status.has_compatible_gpu:
+                self.repo.set_preference("processing_device", "cpu")
+                return "cpu"
+            return saved
+        preference = "gpu" if self.hardware_status.has_compatible_gpu else "cpu"
+        self.repo.set_preference("processing_device", preference)
+        return preference
+
+    def _set_processing_device_preference(self, preference: str) -> None:
+        if preference == "gpu" and not self.hardware_status.has_compatible_gpu:
+            preference = "cpu"
+            self.statusBar().showMessage("GPU is not available; AI mapping will use CPU.", 4500)
+        if preference not in {"cpu", "gpu"}:
+            return
+        self.processing_device_preference = preference
+        self.repo.set_preference("processing_device", preference)
+        self._update_settings_page()
+        label = "GPU" if preference == "gpu" else "CPU"
+        self.statusBar().showMessage(f"AI processing device set to {label}.", 3500)
+
+    def refresh_hardware_status(self) -> None:
+        self.hardware_status = detect_hardware()
+        if self.processing_device_preference == "gpu" and not self.hardware_status.has_compatible_gpu:
+            self.processing_device_preference = "cpu"
+            self.repo.set_preference("processing_device", "cpu")
+        elif self.processing_device_preference not in {"cpu", "gpu"}:
+            self.processing_device_preference = "gpu" if self.hardware_status.has_compatible_gpu else "cpu"
+            self.repo.set_preference("processing_device", self.processing_device_preference)
+        self._update_settings_page()
+        self.statusBar().showMessage("Hardware check complete.", 3500)
+
+    def _update_settings_page(self) -> None:
+        if not hasattr(self, "settings"):
+            return
+        self.settings.set_hardware_status(self.hardware_status, self.processing_device_preference)
+        self.settings.set_storage_paths(
+            self.repo.db_path,
+            self.output_manager.root_dir,
+            self.geotiff_cache.cache_dir,
+        )
+
+    def _selected_inference_device(self) -> str:
+        return inference_device_arg(self.processing_device_preference, self.hardware_status)
+
+    def _show_startup_hardware_warning_if_needed(self) -> None:
+        if self._startup_hardware_warning_shown or self.hardware_status.has_compatible_gpu:
+            return
+        self._startup_hardware_warning_shown = True
+        steps = "\n".join(f"{index}. {step}" for index, step in enumerate(self.hardware_status.setup_steps, start=1))
+        box = QMessageBox(self)
+        box.setWindowTitle("GPU Acceleration Not Ready")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            "AI mapping will use CPU processing on this computer.\n\n"
+            f"{self.hardware_status.issue_detail}\n\n"
+            "Recommended setup:\n"
+            f"{steps}"
+        )
+        settings_btn = box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+        guide_btn = box.addButton("Open Setup Guide", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is settings_btn:
+            self.show_settings()
+        elif clicked is guide_btn:
+            QDesktopServices.openUrl(QUrl(PYTORCH_SETUP_URL))
+
+    def _start_integrity_monitor(self) -> None:
+        self._integrity_timer.setInterval(5000)
+        self._integrity_timer.timeout.connect(self._sync_current_project_integrity)
+        self._integrity_timer.start()
 
     # ------------------------------------------------------------------
     # Dashboard and project workflow
@@ -592,6 +716,7 @@ class MainWindow(QMainWindow):
     def _set_project_geotiff_cache(self, project_output_dir: str | Path) -> None:
         cache_dir = Path(project_output_dir) / "cache" / "geotiff"
         self.geotiff_cache.set_cache_dir(cache_dir)
+        self._update_settings_page()
 
     def _log_missing_paths(self, bundle: ProjectBundle) -> None:
         missing = []
@@ -790,6 +915,99 @@ class MainWindow(QMainWindow):
             self.current_bundle.project.output_dir,
         )
         self.workspace.set_outputs(self.output_manager.list_outputs_at(output_dir))
+        self._update_settings_page()
+
+    def _sync_current_project_integrity(self, notify: bool = False) -> bool:
+        if self.current_bundle is None:
+            if hasattr(self, "settings"):
+                self.settings.set_sync_status("No project open")
+            return False
+        if self._active_mapping_worker is not None and self._active_mapping_worker.isRunning():
+            return False
+
+        project_id = self.current_bundle.project.id
+        try:
+            bundle = self.repo.get_bundle(project_id)
+        except KeyError:
+            return False
+
+        removed_results: list[str] = []
+        for result in bundle.results:
+            missing_paths = [path for path in self._result_paths(result) if not path.exists()]
+            if not missing_paths:
+                continue
+            removed_results.append(Path(result.json_path).name or f"result {result.id}")
+            self.repo.remove_analysis_result(project_id, result.id)
+
+        removed_assets: list[str] = []
+        geotiff_removed = False
+        for asset in bundle.assets:
+            if asset.asset_type == "output_dir":
+                continue
+            if asset.exists:
+                continue
+            removed_assets.append(asset.display_name)
+            if asset.asset_type == "geotiff":
+                geotiff_removed = True
+            self.repo.remove_asset(project_id, asset.asset_type)
+
+        removed_models: list[str] = []
+        for model in bundle.models:
+            if model.exists:
+                continue
+            removed_models.append(model.display_name)
+            self.repo.remove_model(project_id, model.role)
+
+        if not removed_results and not removed_assets and not removed_models:
+            self.refresh_project_outputs()
+            self.settings.set_sync_status("Watching current project outputs")
+            return False
+
+        self.current_bundle = self.repo.get_bundle(project_id)
+        self.workspace.set_project(self.current_bundle)
+        self.refresh_project_outputs()
+        self.refresh_dashboard()
+
+        if removed_results:
+            self._clear_mapping_result_view()
+            self._recover_latest_analysis(self.current_bundle)
+
+        if geotiff_removed:
+            self.current_geotiff = None
+            self.workspace.clear_geotiff_metadata()
+            if self.map_ready:
+                self._run_js("clearOverlay();")
+
+        parts = []
+        if removed_results:
+            parts.append(f"{len(removed_results)} stale analysis result(s)")
+        if removed_assets:
+            parts.append(f"{len(removed_assets)} missing asset link(s)")
+        if removed_models:
+            parts.append(f"{len(removed_models)} missing model link(s)")
+        message = "Project synchronized: removed " + " and ".join(parts) + "."
+        self.workspace.append_log(message)
+        self.settings.set_sync_status(message)
+        self.statusBar().showMessage(message, 6500 if notify else 4500)
+        return True
+
+    def _clear_mapping_result_view(self) -> None:
+        self.latest_mapping_result = None
+        self.workspace.update_counts({})
+        if self.map_ready:
+            self._run_js("clearDetections(); setScanBox(0, 0, 0, 0);")
+
+    @staticmethod
+    def _result_paths(result) -> list[Path]:
+        paths = []
+        for raw in [
+            result.json_path,
+            result.csv_path,
+            result.summary.get("xlsx_path", ""),
+        ]:
+            if raw:
+                paths.append(Path(raw))
+        return paths
 
     def open_output_file(self, path: str) -> None:
         if not self._validate_managed_output(path):
@@ -800,12 +1018,6 @@ class MainWindow(QMainWindow):
         if not self._validate_managed_output(path):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
-
-    def copy_output_path(self, path: str) -> None:
-        if not self._validate_managed_output(path):
-            return
-        QApplication.clipboard().setText(str(Path(path)))
-        self.statusBar().showMessage("Output path copied.", 2500)
 
     def export_output_file(self, path: str) -> None:
         if not self._validate_managed_output(path):
@@ -844,8 +1056,10 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "Delete failed", f"Unable to delete the output file.\n\n{exc}")
             return
+        synced = self._sync_current_project_integrity(notify=True)
         self.refresh_project_outputs()
-        self.statusBar().showMessage("Output file deleted.", 2500)
+        if not synced:
+            self.statusBar().showMessage("Output file deleted.", 2500)
 
     def _validate_managed_output(self, path: str | Path) -> bool:
         file_path = Path(path)
@@ -945,6 +1159,8 @@ class MainWindow(QMainWindow):
             title="Running AI Mapping",
         )
         dialog = self._mapping_dialog
+        device = self._selected_inference_device()
+        device_label = "GPU" if device != "cpu" else "CPU"
 
         if is_geotiff_source:
             self._active_mapping_worker = AiGeotiffMappingWorker(
@@ -952,24 +1168,26 @@ class MainWindow(QMainWindow):
                 leaf.path,
                 disease.path,
                 output_dir=output_dir,
+                device=device,
                 parent=self,
             )
             self._active_mapping_worker.scan_box.connect(self._on_scan_box)
             self.fit_overlay()
-            self.workspace.append_log("GeoTIFF AI analysis will use native raster resolution.")
+            self.workspace.append_log(f"GeoTIFF AI analysis will use native raster resolution on {device_label}.")
         else:
             self._active_mapping_worker = AiMappingWorker(
                 source_path,
                 leaf.path,
                 disease.path,
                 output_dir=output_dir,
+                device=device,
                 parent=self,
             )
         self._active_mapping_worker.progress.connect(self._on_mapping_progress)
         self._active_mapping_worker.finished.connect(self._on_mapping_finished)
         self._active_mapping_worker.failed.connect(self._on_mapping_failed)
         self._active_mapping_worker.start()
-        self.workspace.append_log(f"AI mapping started. Output: {output_dir}")
+        self.workspace.append_log(f"AI mapping started on {device_label}. Output: {output_dir}")
         dialog.exec()
         if dialog.was_cancelled and self._active_mapping_worker is not None:
             self._active_mapping_worker.requestInterruption()
@@ -1083,6 +1301,25 @@ class MainWindow(QMainWindow):
                 "north": info.north,
             },
         }
+        if info.tile_dir is not None and info.tile_levels:
+            base_url = QUrl.fromLocalFile(str(info.tile_dir)).toString()
+            if not base_url.endswith("/"):
+                base_url += "/"
+            payload["tiles"] = {
+                "baseUrl": base_url,
+                "tileSize": info.tile_size,
+                "levels": [
+                    {
+                        "index": level.index,
+                        "width": level.width,
+                        "height": level.height,
+                        "cols": level.cols,
+                        "rows": level.rows,
+                        "scale": level.scale,
+                    }
+                    for level in info.tile_levels
+                ],
+            }
         self._run_js(f"setOverlay({json.dumps(payload)});")
 
     def _send_detections_to_map(self, result: MappingResult) -> None:
@@ -1201,35 +1438,16 @@ class MainWindow(QMainWindow):
         self.refresh_dashboard()
         self.statusBar().showMessage("Preferred AI models saved.", 3500)
 
-    def open_dataset_manager(self) -> None:
-        if self.current_bundle is None:
-            QMessageBox.information(self, "Open a project", "Open a project to manage local dataset paths.")
-            return
-        self.stack.setCurrentWidget(self.workspace)
-        self.workspace.tabs.setCurrentIndex(0)
-
     def show_settings(self) -> None:
-        box = QMessageBox(self)
-        box.setWindowTitle("Preferences")
-        box.setIcon(QMessageBox.Icon.Information)
+        self.refresh_hardware_status()
+        self._update_settings_page()
+        self.stack.setCurrentWidget(self.settings)
+        self.statusBar().showMessage("Settings ready.", 2500)
+
+    def clear_project_cache(self) -> None:
         cache_path = self.geotiff_cache.cache_dir
-        cache_text = str(cache_path) if cache_path else "Open a project to activate its GeoTIFF preview cache."
-        box.setText(
-            "Offline database:\n"
-            f"{self.repo.db_path}\n\n"
-            "System output root:\n"
-            f"{self.output_manager.root_dir}\n\n"
-            "Current project GeoTIFF cache:\n"
-            f"{cache_text}\n\n"
-            "Storage policy:\n"
-            "Project outputs and reusable GeoTIFF previews are stored inside each project's managed output folder."
-        )
-        clear_btn = None
-        if cache_path is not None:
-            clear_btn = box.addButton("Clear Project Cache", QMessageBox.ButtonRole.DestructiveRole)
-        box.addButton(QMessageBox.StandardButton.Ok)
-        box.exec()
-        if clear_btn is None or box.clickedButton() is not clear_btn:
+        if cache_path is None:
+            self.statusBar().showMessage("Open a project to activate its GeoTIFF cache.", 3500)
             return
 
         confirm = QMessageBox.question(
@@ -1243,8 +1461,8 @@ class MainWindow(QMainWindow):
             return
         self.geotiff_cache.clear()
         self.refresh_project_outputs()
+        self._update_settings_page()
         self.statusBar().showMessage("Project GeoTIFF cache cleared.", 4000)
-        QMessageBox.information(self, "Project Cache", "Cached GeoTIFF previews for this project have been cleared.")
 
     # ------------------------------------------------------------------
     # Theming
@@ -1301,6 +1519,8 @@ def _record_from_payload(payload: dict) -> DetectionRecord:
 
 
 def run() -> None:
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    _configure_web_engine_gpu()
     app = QApplication(sys.argv)
     app.setApplicationName("Musa AI")
     app.setOrganizationName("Drone GIS")

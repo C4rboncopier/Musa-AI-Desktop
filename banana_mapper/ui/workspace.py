@@ -34,7 +34,6 @@ class OutputFileRow(QFrame):
     openRequested = pyqtSignal(str)
     revealRequested = pyqtSignal(str)
     exportRequested = pyqtSignal(str)
-    copyPathRequested = pyqtSignal(str)
     deleteRequested = pyqtSignal(str)
 
     def __init__(self, item: OutputFile, parent=None) -> None:
@@ -64,7 +63,6 @@ class OutputFileRow(QFrame):
             ("Open", self.openRequested),
             ("Reveal", self.revealRequested),
             ("Export", self.exportRequested),
-            ("Copy", self.copyPathRequested),
             ("Delete", self.deleteRequested),
         ]:
             btn = QPushButton(text)
@@ -89,7 +87,6 @@ class WorkspacePage(QWidget):
     outputOpenRequested = pyqtSignal(str)
     outputRevealRequested = pyqtSignal(str)
     outputExportRequested = pyqtSignal(str)
-    outputCopyPathRequested = pyqtSignal(str)
     outputDeleteRequested = pyqtSignal(str)
     leafModelRequested = pyqtSignal()
     diseaseModelRequested = pyqtSignal()
@@ -125,7 +122,7 @@ class WorkspacePage(QWidget):
         self._project_explorer_visible = True
         self._inspector_visible = True
         self._resolution_options: list[tuple[str, int]] = [
-            ("Maximum (65 MP, GPU optimized)", 65_000_000),
+            ("Maximum (65 MP, tiled/GPU optimized)", 65_000_000),
             ("High (40 MP)", 40_000_000),
             ("Medium (20 MP)", 20_000_000),
             ("Low (10 MP)", 10_000_000),
@@ -350,15 +347,19 @@ class WorkspacePage(QWidget):
 
         self.map_view = QWebEngineView(panel)
         self.map_view.setObjectName("mapView")
-        self.map_view.settings().setAttribute(
+        settings = self.map_view.settings()
+        settings.setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
         )
-        self.map_view.settings().setAttribute(
+        settings.setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
         )
-        self.map_view.settings().setAttribute(
+        settings.setAttribute(
             QWebEngineSettings.WebAttribute.LocalStorageEnabled, True
         )
+        self._set_web_engine_attribute(settings, "WebGLEnabled", True)
+        self._set_web_engine_attribute(settings, "Accelerated2dCanvasEnabled", True)
+        self._set_web_engine_attribute(settings, "ScrollAnimatorEnabled", False)
         layout.addWidget(self.map_view, 1)
         return panel
 
@@ -404,7 +405,7 @@ class WorkspacePage(QWidget):
         res_layout = resolution.layout()
         self.geotiff_resolution_combo = self._make_resolution_combo()
         res_layout.addWidget(self.geotiff_resolution_combo)
-        self.render_resolution_label = QLabel("Rendering: Maximum (65 MP, GPU optimized)")
+        self.render_resolution_label = QLabel("Rendering: Maximum (65 MP, tiled/GPU optimized)")
         self.render_resolution_label.setObjectName("metaValue")
         self.render_resolution_label.setWordWrap(True)
         self.processing_resolution_label = QLabel("Processing: Native GeoTIFF resolution")
@@ -585,6 +586,12 @@ class WorkspacePage(QWidget):
     def set_web_channel(self, channel) -> None:
         self.map_view.page().setWebChannel(channel)
 
+    @staticmethod
+    def _set_web_engine_attribute(settings, attribute_name: str, enabled: bool) -> None:
+        attribute = getattr(QWebEngineSettings.WebAttribute, attribute_name, None)
+        if attribute is not None:
+            settings.setAttribute(attribute, enabled)
+
     def set_project(self, bundle: ProjectBundle) -> None:
         self.current_bundle = bundle
         project = bundle.project
@@ -629,7 +636,6 @@ class WorkspacePage(QWidget):
             row.openRequested.connect(self.outputOpenRequested.emit)
             row.revealRequested.connect(self.outputRevealRequested.emit)
             row.exportRequested.connect(self.outputExportRequested.emit)
-            row.copyPathRequested.connect(self.outputCopyPathRequested.emit)
             row.deleteRequested.connect(self.outputDeleteRequested.emit)
             self.output_list_layout.insertWidget(self.output_list_layout.count() - 1, row)
 
