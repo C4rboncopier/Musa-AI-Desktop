@@ -91,6 +91,7 @@ class WorkspacePage(QWidget):
     resetViewRequested = pyqtSignal()
     zoomInRequested = pyqtSignal()
     zoomOutRequested = pyqtSignal()
+    baseMapChanged = pyqtSignal(str)
     overlayVisibilityChanged = pyqtSignal(bool)
     overlayOpacityChanged = pyqtSignal(int)
     detectionOpacityChanged = pyqtSignal(int)
@@ -324,6 +325,12 @@ class WorkspacePage(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, sig=signal: sig.emit())
             controls_layout.addWidget(btn)
+        self.base_map_combo = QComboBox()
+        self.base_map_combo.setObjectName("mapBaseCombo")
+        self.base_map_combo.addItem("OpenStreetMap", "osm")
+        self.base_map_combo.addItem("Satellite", "satellite")
+        self.base_map_combo.setFixedWidth(150)
+        controls_layout.addWidget(self.base_map_combo)
         controls_layout.addStretch(1)
         self.coord_label = QLabel("Cursor: --, --")
         self.coord_label.setObjectName("mapToolbarLabel")
@@ -370,6 +377,7 @@ class WorkspacePage(QWidget):
 
     def _assets_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(12)
@@ -415,6 +423,7 @@ class WorkspacePage(QWidget):
 
     def _outputs_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(10)
@@ -445,6 +454,7 @@ class WorkspacePage(QWidget):
 
     def _ai_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(10)
@@ -478,6 +488,7 @@ class WorkspacePage(QWidget):
 
     def _metadata_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(10)
@@ -489,11 +500,20 @@ class WorkspacePage(QWidget):
             "Spatial Resolution",
             "CRS",
             "Band Count",
+            "Elevation / Altitude",
+            "Camera",
+            "Capture Time",
+            "Sensor Settings",
+            "Flight / GPS",
             "Source Extent",
             "Map Extent",
             "Geotransform",
             "Pixel Size",
             "Rendering Preview",
+            "Raster Details",
+            "Storage",
+            "Band Details",
+            "Metadata Tags",
         ]
         for field in fields:
             row, value = meta_row(field, "--")
@@ -505,6 +525,7 @@ class WorkspacePage(QWidget):
 
     def _logs_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(8)
@@ -522,6 +543,7 @@ class WorkspacePage(QWidget):
         self.visibility_toggle.toggled.connect(self.overlayVisibilityChanged.emit)
         self.opacity_slider.valueChanged.connect(self._overlay_opacity_changed)
         self.ai_opacity_slider.valueChanged.connect(self._detection_opacity_changed)
+        self.base_map_combo.currentIndexChanged.connect(self._on_base_map_changed)
         self.geotiff_resolution_combo.currentIndexChanged.connect(self._on_resolution_combo_changed)
         for key, checkbox in self.layer_toggles.items():
             checkbox.toggled.connect(
@@ -632,6 +654,18 @@ class WorkspacePage(QWidget):
         self.metadata_labels["Geotransform"].setText(", ".join(f"{v:.6f}" for v in info.transform))
         self.metadata_labels["Pixel Size"].setText(f"X {info.pixel_size_x:.8f}\nY {info.pixel_size_y:.8f}")
         self.metadata_labels["Rendering Preview"].setText(info.preview_resolution_label)
+        for field in [
+            "Elevation / Altitude",
+            "Camera",
+            "Capture Time",
+            "Sensor Settings",
+            "Flight / GPS",
+            "Raster Details",
+            "Storage",
+            "Band Details",
+            "Metadata Tags",
+        ]:
+            self.metadata_labels[field].setText(info.metadata_details.get(field, "--"))
         native_text = f"AI resolution: Native {info.pixel_resolution_label}"
         self.processing_resolution_label.setText(f"Processing: Native {info.pixel_resolution_label}")
         self.ai_processing_status.setText(native_text)
@@ -653,6 +687,14 @@ class WorkspacePage(QWidget):
 
     def set_zoom(self, zoom: int) -> None:
         self.zoom_label.setText(f"Zoom: {zoom}")
+
+    def set_base_map(self, base_map: str) -> None:
+        for index in range(self.base_map_combo.count()):
+            if self.base_map_combo.itemData(index) == base_map:
+                self.base_map_combo.blockSignals(True)
+                self.base_map_combo.setCurrentIndex(index)
+                self.base_map_combo.blockSignals(False)
+                return
 
     def set_project_explorer_visible(self, visible: bool) -> None:
         self._set_side_panel_visible(self.left_panel, 0, visible)
@@ -689,6 +731,11 @@ class WorkspacePage(QWidget):
     def _detection_opacity_changed(self, value: int) -> None:
         self.ai_opacity_value.setText(f"{value}%")
         self.detectionOpacityChanged.emit(value)
+
+    def _on_base_map_changed(self, index: int) -> None:
+        value = self.base_map_combo.itemData(index)
+        if value:
+            self.baseMapChanged.emit(str(value))
 
     def _make_resolution_combo(self) -> QComboBox:
         combo = QComboBox()

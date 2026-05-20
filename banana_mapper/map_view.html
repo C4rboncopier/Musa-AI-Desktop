@@ -149,6 +149,27 @@
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script>
   var bridge = null, map = null;
+  var baseTileLayer = null;
+  var activeBaseMap = "osm";
+  var BASE_MAPS = {
+    osm: {
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      options: {
+        maxZoom: 25,
+        maxNativeZoom: 19,
+        subdomains: "abc",
+        attribution: "&copy; OpenStreetMap contributors"
+      }
+    },
+    satellite: {
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      options: {
+        maxZoom: 23,
+        maxNativeZoom: 19,
+        attribution: "Tiles &copy; Esri"
+      }
+    }
+  };
   var imageOverlay = null, extentRectangle = null, labelTooltip = null;
   var currentBounds = null, pendingOverlay = null, pendingDetections = null;
   var overlayVisible = true, overlayOpacity = 0.78;
@@ -167,6 +188,8 @@
   var lastBridgeCoordAt = 0;
   var lastCoordTextAt = 0;
   var scanBoxLayer = null;
+  var mapRefreshTimer = null;
+  var mapRefreshUntil = 0;
   var detectionVisibility = {
     full_leaf: false, cut_leaf: true,
     black_sigatoka: true, panama: true,
@@ -198,13 +221,7 @@
     }).setView([11.0, 122.0], 6);
 
     createMapPanes();
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 25,
-      maxNativeZoom: 19,
-      keepBuffer: 4,
-      crossOrigin: true,
-      attribution: "&copy; OpenStreetMap contributors"
-    }).addTo(map);
+    baseTileLayer = createBaseTileLayer(activeBaseMap).addTo(map);
     L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
     pointRenderer = L.canvas({ padding: 0.35 });
     detectionGroup = L.layerGroup().addTo(map);
@@ -216,6 +233,9 @@
     map.on("zoomend", function() {
       if (bridge) bridge.reportZoom(map.getZoom());
       scheduleDetectionRender();
+    });
+    map.on("move zoom resize moveend zoomend viewreset", function() {
+      scheduleMapRefresh(500);
     });
     map.on("moveend resize", function() { scheduleDetectionRender(false); });
 
@@ -237,6 +257,53 @@
       });
     }
     mapReady = true;
+    scheduleMapRefresh(2500);
+  }
+
+  function createBaseTileLayer(name) {
+    var spec = BASE_MAPS[name] || BASE_MAPS.osm;
+    var options = Object.assign({
+      keepBuffer: 6,
+      updateWhenIdle: false,
+      updateWhenZooming: true,
+      updateInterval: 120,
+      detectRetina: true,
+      crossOrigin: true
+    }, spec.options || {});
+    var layer = L.tileLayer(spec.url, options);
+    layer.on("tileerror", function(e) {
+      var tile = e.tile;
+      if (!tile || tile._musaRetryCount >= 2) return;
+      tile._musaRetryCount = (tile._musaRetryCount || 0) + 1;
+      setTimeout(function() {
+        if (tile && tile.src) tile.src = tile.src.split("?")[0] + "?retry=" + Date.now();
+      }, 250 * tile._musaRetryCount);
+    });
+    return layer;
+  }
+
+  function setBaseMap(name) {
+    if (!map || !BASE_MAPS[name] || name === activeBaseMap) return;
+    activeBaseMap = name;
+    if (baseTileLayer) map.removeLayer(baseTileLayer);
+    baseTileLayer = createBaseTileLayer(activeBaseMap).addTo(map);
+    baseTileLayer.bringToBack();
+    scheduleMapRefresh(1800);
+  }
+
+  function scheduleMapRefresh(durationMs) {
+    if (!map) return;
+    mapRefreshUntil = Math.max(mapRefreshUntil, Date.now() + (durationMs || 500));
+    if (mapRefreshTimer) return;
+    mapRefreshTimer = setInterval(function() {
+      if (!map || Date.now() > mapRefreshUntil) {
+        clearInterval(mapRefreshTimer);
+        mapRefreshTimer = null;
+        return;
+      }
+      map.invalidateSize({ animate: false, pan: false });
+      if (imageOverlay && imageOverlay.refresh) imageOverlay.refresh();
+    }, 160);
   }
 
   function createMapPanes() {
@@ -279,12 +346,20 @@
         return (a.width * a.height) - (b.width * b.height);
       });
       this._tiles = {};
+      this._loading = {};
+      this._wanted = {};
+      this._wantedSignature = "";
+      this._wantedSince = 0;
+      this._imageCache = {};
+      this._cacheOrder = [];
+      this._pruneTimer = null;
       this._resetFrame = null;
+      this._refreshFrame = null;
     },
 
     onAdd: function(mapInstance) {
       this._map = mapInstance;
-      this._map.on("moveend zoomend resize", this._scheduleReset, this);
+      this._map.on("move zoom resize moveend zoomend viewreset", this._scheduleReset, this);
       this._scheduleReset();
     },
 
@@ -293,8 +368,16 @@
         L.Util.cancelAnimFrame(this._resetFrame);
         this._resetFrame = null;
       }
+      if (this._refreshFrame) {
+        L.Util.cancelAnimFrame(this._refreshFrame);
+        this._refreshFrame = null;
+      }
+      if (this._pruneTimer) {
+        clearTimeout(this._pruneTimer);
+        this._pruneTimer = null;
+      }
       if (this._map) {
-        this._map.off("moveend zoomend resize", this._scheduleReset, this);
+        this._map.off("move zoom resize moveend zoomend viewreset", this._scheduleReset, this);
       }
       this._removeAllTiles();
       this._map = null;
@@ -342,7 +425,14 @@
           if (!this._tiles[key]) this._addTile(level, x, y, key);
         }
       }
-      this._pruneTiles(wanted);
+      this._wanted = wanted;
+      var signature = Object.keys(wanted).sort().join("|");
+      if (signature !== this._wantedSignature) {
+        this._wantedSignature = signature;
+        this._wantedSince = Date.now();
+      }
+      this._schedulePrune(wanted);
+      this._requestRefresh();
     },
 
     _selectLevel: function() {
@@ -392,16 +482,53 @@
     },
 
     _addTile: function(level, x, y, key) {
+      if (this._loading[key]) return;
       var url = this._baseUrl + level.index + "/" + x + "_" + y + ".png";
-      var layer = L.imageOverlay(url, this._tileBounds(level, x, y), {
-        opacity: this.options.opacity,
-        interactive: false,
-        crossOrigin: false,
-        zIndex: this.options.zIndex || 300,
-        pane: this.options.pane,
-        className: "geotiff-image-tile"
-      }).addTo(this._map);
-      this._tiles[key] = layer;
+      this._loading[key] = true;
+      this._loadImage(url, function(ok) {
+        delete this._loading[key];
+        if (!ok || !this._map || !this._wanted[key] || this._tiles[key]) return;
+        var layer = L.imageOverlay(url, this._tileBounds(level, x, y), {
+          opacity: this.options.opacity,
+          interactive: false,
+          crossOrigin: false,
+          zIndex: this.options.zIndex || 300,
+          pane: this.options.pane,
+          className: "geotiff-image-tile"
+        }).addTo(this._map);
+        this._tiles[key] = layer;
+        this._requestRefresh();
+      }, this);
+    },
+
+    _loadImage: function(url, done, context) {
+      if (this._imageCache[url]) {
+        done.call(context, true);
+        return;
+      }
+      var img = new Image();
+      img.onload = function() {
+        this._imageCache[url] = true;
+        this._cacheOrder.push(url);
+        while (this._cacheOrder.length > 640) {
+          var stale = this._cacheOrder.shift();
+          delete this._imageCache[stale];
+        }
+        done.call(context, true);
+      }.bind(this);
+      img.onerror = function() {
+        setTimeout(function() {
+          var retry = new Image();
+          retry.onload = function() {
+            this._imageCache[url] = true;
+            this._cacheOrder.push(url);
+            done.call(context, true);
+          }.bind(this);
+          retry.onerror = function() { done.call(context, false); };
+          retry.src = url + "?retry=" + Date.now();
+        }.bind(this), 180);
+      }.bind(this);
+      img.src = url;
     },
 
     _tileBounds: function(level, x, y) {
@@ -426,15 +553,56 @@
       }, this);
     },
 
+    _schedulePrune: function(wanted) {
+      if (this._pruneTimer) clearTimeout(this._pruneTimer);
+      this._pruneTimer = setTimeout(function() {
+        this._pruneTimer = null;
+        if (this._hasPendingWantedTiles(wanted)) {
+          this._schedulePrune(wanted);
+          return;
+        }
+        if (this._map) this._pruneTiles(wanted);
+      }.bind(this), 420);
+    },
+
+    _hasPendingWantedTiles: function(wanted) {
+      if (Date.now() - this._wantedSince > 2500) return false;
+      return Object.keys(wanted).some(function(key) {
+        return this._loading[key] || !this._tiles[key];
+      }, this);
+    },
+
+    _requestRefresh: function() {
+      if (!this._map || this._refreshFrame) return;
+      this._refreshFrame = L.Util.requestAnimFrame(function() {
+        this._refreshFrame = null;
+        if (this._map) this._map.invalidateSize({ animate: false, pan: false });
+      }, this);
+    },
+
+    refresh: function() {
+      this._scheduleReset();
+      this._requestRefresh();
+      return this;
+    },
+
     _removeAllTiles: function() {
       if (!this._map) {
         this._tiles = {};
+        this._loading = {};
+        this._wanted = {};
+        this._wantedSignature = "";
+        this._wantedSince = 0;
         return;
       }
       Object.keys(this._tiles).forEach(function(key) {
         this._map.removeLayer(this._tiles[key]);
       }, this);
       this._tiles = {};
+      this._loading = {};
+      this._wanted = {};
+      this._wantedSignature = "";
+      this._wantedSince = 0;
     }
   });
   }
@@ -477,6 +645,7 @@
     labelTooltip = L.tooltip({ permanent: false, direction: "top", className: "overlay-label" })
       .setLatLng(currentBounds.getCenter()).setContent(esc(payload.fileName)).addTo(map);
     fitToOverlay();
+    scheduleMapRefresh(3500);
   }
 
   function clearOverlay() {
@@ -745,6 +914,7 @@
   function fitToOverlay() {
     if (map && currentBounds) {
       map.fitBounds(currentBounds, { padding: [12, 12], animate: true, duration: 0.35 });
+      scheduleMapRefresh(1800);
     }
   }
 
@@ -758,7 +928,10 @@
 
   function resetView() {
     if (currentBounds) fitToOverlay();
-    else if (map) map.setView([11.0, 122.0], 6);
+    else if (map) {
+      map.setView([11.0, 122.0], 6);
+      scheduleMapRefresh(1200);
+    }
   }
 
   function applyTheme(t) {
@@ -775,6 +948,7 @@
     document.body.style.background = t.mapBg;
     currentExtentColor = t.extentColor;
     if (extentRectangle) extentRectangle.setStyle({ color: t.extentColor });
+    scheduleMapRefresh(1200);
   }
 
   function esc(v) {

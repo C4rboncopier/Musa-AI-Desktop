@@ -12,6 +12,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from .detection import MappingResult, run_funnel_mapping_geotiff
 from .geotiff import DEFAULT_PREVIEW_SCALE, GeoTiffError, GeoTiffInfo, load_geotiff_for_leaflet
+from .hardware import detect_hardware
 
 
 class GeoTiffCancelled(RuntimeError):
@@ -112,3 +113,21 @@ class AiGeotiffMappingWorker(QThread):
 
     def _on_scan(self, lat_min: float, lon_min: float, lat_max: float, lon_max: float) -> None:
         self.scan_box.emit(lat_min, lon_min, lat_max, lon_max)
+
+
+class HardwareCheckWorker(QThread):
+    """Worker thread that runs hardware diagnostics with progress feedback."""
+
+    progress: pyqtSignal = pyqtSignal(int, str, str)
+    finished: pyqtSignal = pyqtSignal(object)   # HardwareStatus
+    failed: pyqtSignal = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            status = detect_hardware(progress_callback=self._on_progress)
+            self.finished.emit(status)
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(f"Hardware diagnostics failed: {exc}")
+
+    def _on_progress(self, percent: int, message: str, level: str) -> None:
+        self.progress.emit(percent, message, level)

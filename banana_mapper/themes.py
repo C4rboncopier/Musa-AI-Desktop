@@ -402,6 +402,24 @@ def generate_stylesheet(theme: ThemeColors) -> str:
             background: {t.window_bg};
             color: {t.window_fg};
         }}
+        QDialog,
+        QMessageBox,
+        QStackedWidget {{
+            background: {t.window_bg};
+            color: {t.window_fg};
+        }}
+        QWidget#dashboardContent,
+        QWidget#inspectorTabs,
+        QWidget#inspectorTabs QWidget {{
+            background: {t.window_bg};
+            color: {t.window_fg};
+        }}
+        QFrame {{
+            color: {t.window_fg};
+        }}
+        QLabel {{
+            color: {t.window_fg};
+        }}
 
         /* ---- Menu bar ---- */
         QMenuBar {{
@@ -467,6 +485,11 @@ def generate_stylesheet(theme: ThemeColors) -> str:
             text-align: left;
             padding: 0 14px;
         }}
+        QPushButton:disabled {{
+            background: {t.secondary_bg};
+            color: {t.muted_fg};
+            border: 1px solid {t.secondary_border};
+        }}
         #primaryButton {{
             background: {t.primary_bg};
             color: {t.primary_fg};
@@ -505,6 +528,48 @@ def generate_stylesheet(theme: ThemeColors) -> str:
         #bodyText {{
             color: {t.body_fg};
             font-size: 12px;
+        }}
+
+        /* ---- Hardware diagnostics ---- */
+        #hardwareInfoCard {{
+            background: {t.secondary_bg};
+            border: 1px solid {t.secondary_border};
+            border-radius: 7px;
+        }}
+        #hardwareLabel {{
+            color: {t.meta_key_fg};
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.6px;
+        }}
+        #hardwareValue {{
+            color: {t.meta_value_fg};
+            font-size: 11px;
+            line-height: 1.35;
+        }}
+        #hardwareProgress {{
+            background: {t.secondary_bg};
+            border: 1px solid {t.secondary_border};
+            border-radius: 5px;
+            color: {t.meta_value_fg};
+            font-size: 10px;
+            font-weight: 700;
+            min-height: 16px;
+            max-height: 16px;
+            text-align: center;
+        }}
+        #hardwareProgress::chunk {{
+            background: {t.primary_bg};
+            border-radius: 4px;
+        }}
+        #diagnosticLog {{
+            background: {t.secondary_bg};
+            color: {t.meta_value_fg};
+            border: 1px solid {t.secondary_border};
+            border-radius: 6px;
+            font-family: "Cascadia Code", "Consolas", monospace;
+            font-size: 10px;
+            padding: 8px;
         }}
 
         /* ---- Metadata ---- */
@@ -607,6 +672,14 @@ def generate_stylesheet(theme: ThemeColors) -> str:
         QScrollArea {{
             border: none;
             background: transparent;
+        }}
+        QAbstractScrollArea {{
+            background: {t.window_bg};
+            color: {t.window_fg};
+            border: none;
+        }}
+        QAbstractScrollArea::viewport {{
+            background: {t.window_bg};
         }}
         QScrollBar:vertical {{
             background: {t.scrollbar_bg};
@@ -721,6 +794,25 @@ def generate_stylesheet(theme: ThemeColors) -> str:
             selection-background-color: {t.menu_selected_bg};
             selection-color: #ffffff;
         }}
+        QTableView,
+        QTreeView,
+        QListView {{
+            background: {t.card_bg};
+            color: {t.window_fg};
+            border: 1px solid {t.card_border};
+            gridline-color: {t.separator_color};
+            alternate-background-color: {t.secondary_bg};
+            selection-background-color: {t.primary_bg};
+            selection-color: {t.primary_fg};
+        }}
+        QHeaderView::section {{
+            background: {t.menubar_bg};
+            color: {t.subtitle_fg};
+            border: 1px solid {t.card_border};
+            padding: 5px 8px;
+            font-size: 10px;
+            font-weight: 800;
+        }}
 
         /* ---- Professional app shell ---- */
         #navRail {{
@@ -729,6 +821,12 @@ def generate_stylesheet(theme: ThemeColors) -> str:
         }}
         #dashboardContent {{
             background: {t.window_bg};
+        }}
+        QScrollArea#projectScroll,
+        QScrollArea#projectScroll::viewport,
+        QWidget#projectContainer {{
+            background: {t.window_bg};
+            color: {t.window_fg};
         }}
         #pageTitle {{
             color: {t.title_fg};
@@ -1037,7 +1135,11 @@ def generate_stylesheet(theme: ThemeColors) -> str:
         QTabWidget::pane {{
             border: 1px solid {t.card_border};
             border-radius: 8px;
-            background: {t.sidebar_bg};
+            background: {t.window_bg};
+        }}
+        #inspectorTabPage {{
+            background: {t.window_bg};
+            color: {t.window_fg};
         }}
         QTabBar::tab {{
             background: transparent;

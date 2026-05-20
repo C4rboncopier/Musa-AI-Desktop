@@ -27,7 +27,7 @@ def _configure_web_engine_gpu() -> None:
 _configure_web_engine_gpu()
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QAction, QDesktopServices, QFont
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QFont
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import (
     QApplication,
@@ -54,7 +54,7 @@ from .ui.dashboard import DashboardPage
 from .ui.dialogs import EditProjectDialog, NewProjectDialog, PreferredModelsDialog
 from .ui.settings import SettingsPage
 from .ui.workspace import WorkspacePage
-from .worker import AiGeotiffMappingWorker, GeoTiffWorker
+from .worker import AiGeotiffMappingWorker, GeoTiffWorker, HardwareCheckWorker
 
 
 class MainWindow(QMainWindow):
@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self.pending_mapping: MappingResult | None = None
         self._active_worker: GeoTiffWorker | None = None
         self._active_mapping_worker: AiGeotiffMappingWorker | None = None
+        self._active_hardware_worker: HardwareCheckWorker | None = None
         self._loading_dialog: LoadingDialog | None = None
         self._mapping_dialog: LoadingDialog | None = None
         self._project_open_dialog: LoadingDialog | None = None
@@ -91,6 +92,9 @@ class MainWindow(QMainWindow):
         self._current_theme_name = self.repo.get_preference("theme", DEFAULT_THEME)
         if self._current_theme_name not in THEMES:
             self._current_theme_name = DEFAULT_THEME
+        self._current_base_map = str(self.repo.get_preference("base_map", "osm") or "osm")
+        if self._current_base_map not in {"osm", "satellite"}:
+            self._current_base_map = "osm"
 
         self.bridge = MapBridge()
         self.web_channel = QWebChannel(self)
@@ -101,6 +105,7 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._connect_signals()
         self._apply_theme(self._current_theme_name)
+        self.workspace.set_base_map(self._current_base_map)
         self._ensure_all_project_output_dirs()
         self._cleanup_removed_feature_assets()
         self._update_settings_page()
@@ -156,11 +161,14 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.inspector_action)
 
         theme_menu = self.menuBar().addMenu("Theme")
+        self.theme_action_group = QActionGroup(self)
+        self.theme_action_group.setExclusive(True)
         for theme_name in THEMES:
             action = QAction(theme_name, self)
             action.setCheckable(True)
             action.setChecked(theme_name == self._current_theme_name)
             action.triggered.connect(lambda _=False, name=theme_name: self._apply_theme(name))
+            self.theme_action_group.addAction(action)
             theme_menu.addAction(action)
 
     def _build_pages(self) -> None:
@@ -214,6 +222,7 @@ class MainWindow(QMainWindow):
         self.workspace.resetViewRequested.connect(self.reset_view)
         self.workspace.zoomInRequested.connect(lambda: self._run_js("zoomIn();"))
         self.workspace.zoomOutRequested.connect(lambda: self._run_js("zoomOut();"))
+        self.workspace.baseMapChanged.connect(self._set_base_map)
         self.workspace.overlayVisibilityChanged.connect(self._set_overlay_visible)
         self.workspace.overlayOpacityChanged.connect(self._set_overlay_opacity)
         self.workspace.detectionOpacityChanged.connect(self._set_detection_opacity)
@@ -262,15 +271,42 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"AI processing device set to {label}.", 3500)
 
     def refresh_hardware_status(self) -> None:
-        self.hardware_status = detect_hardware()
+        if self._active_hardware_worker is not None and self._active_hardware_worker.isRunning():
+            return
+        self.settings.begin_hardware_check()
+        self.statusBar().showMessage("Hardware check started.", 2500)
+        self._active_hardware_worker = HardwareCheckWorker(self)
+        self._active_hardware_worker.progress.connect(self._on_hardware_check_progress)
+        self._active_hardware_worker.finished.connect(self._on_hardware_check_finished)
+        self._active_hardware_worker.failed.connect(self._on_hardware_check_failed)
+        self._active_hardware_worker.start()
+
+    def _on_hardware_check_progress(self, percent: int, message: str, level: str) -> None:
+        if self.sender() is not self._active_hardware_worker:
+            return
+        self.settings.update_hardware_check_progress(percent, message, level)
+        self.statusBar().showMessage(message, 2000)
+
+    def _on_hardware_check_finished(self, status_obj: object) -> None:
+        if self.sender() is not self._active_hardware_worker:
+            return
+        self.hardware_status = status_obj  # type: ignore[assignment]
         if self.processing_device_preference == "gpu" and not self.hardware_status.has_compatible_gpu:
             self.processing_device_preference = "cpu"
             self.repo.set_preference("processing_device", "cpu")
         elif self.processing_device_preference not in {"cpu", "gpu"}:
             self.processing_device_preference = "gpu" if self.hardware_status.has_compatible_gpu else "cpu"
             self.repo.set_preference("processing_device", self.processing_device_preference)
+        self._active_hardware_worker = None
         self._update_settings_page()
         self.statusBar().showMessage("Hardware check complete.", 3500)
+
+    def _on_hardware_check_failed(self, error_message: str) -> None:
+        if self.sender() is not self._active_hardware_worker:
+            return
+        self._active_hardware_worker = None
+        self.settings.fail_hardware_check(error_message)
+        self.statusBar().showMessage("Hardware check failed.", 4500)
 
     def _update_settings_page(self) -> None:
         if not hasattr(self, "settings"):
@@ -639,6 +675,7 @@ class MainWindow(QMainWindow):
             "spatial_resolution": info.spatial_resolution_label,
             "preview_width": info.preview_width,
             "preview_height": info.preview_height,
+            "metadata_details": info.metadata_details,
         }
 
     def _on_resolution_changed(self, index: int) -> None:
@@ -1252,6 +1289,7 @@ class MainWindow(QMainWindow):
     def _handle_map_ready(self) -> None:
         self.map_ready = True
         self._push_theme_to_map()
+        self._push_base_map_to_map()
         if self.pending_geotiff:
             info = self.pending_geotiff
             self.pending_geotiff = None
@@ -1337,6 +1375,22 @@ class MainWindow(QMainWindow):
     def _set_detection_opacity(self, value: int) -> None:
         self._run_js(f"setDetectionOpacity({value / 100:.2f});")
 
+    def _set_base_map(self, base_map: str) -> None:
+        if base_map not in {"osm", "satellite"}:
+            return
+        self._current_base_map = base_map
+        self.repo.set_preference("base_map", base_map)
+        self._push_base_map_to_map()
+        label = "Satellite" if base_map == "satellite" else "OpenStreetMap"
+        self.statusBar().showMessage(f"Basemap set to {label}.", 2500)
+
+    def _push_base_map_to_map(self) -> None:
+        if hasattr(self, "workspace"):
+            self.workspace.set_base_map(self._current_base_map)
+        if not self.map_ready:
+            return
+        self._run_js(f"setBaseMap({json.dumps(self._current_base_map)});")
+
     def _run_js(self, script: str) -> None:
         self.workspace.map_view.page().runJavaScript(script)
 
@@ -1369,11 +1423,9 @@ class MainWindow(QMainWindow):
         if self.current_bundle is not None:
             self._apply_preferred_models_to_project(self.current_bundle.project.id)
             self._reload_current_bundle()
-            self.stack.setCurrentWidget(self.workspace)
-            self.workspace.tabs.setCurrentIndex(1)
             self.workspace.append_log("Preferred AI models saved and applied to this project.")
 
-        self.refresh_dashboard()
+        self.show_dashboard()
         self.statusBar().showMessage("Preferred AI models saved.", 3500)
 
     def show_settings(self) -> None:

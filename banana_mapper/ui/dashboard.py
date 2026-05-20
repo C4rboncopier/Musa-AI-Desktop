@@ -214,9 +214,11 @@ class DashboardPage(QWidget):
         content_layout.addLayout(projects_header)
 
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("projectScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.project_container = QWidget()
+        self.project_container.setObjectName("projectContainer")
         self.project_list = QVBoxLayout(self.project_container)
         self.project_list.setContentsMargins(0, 0, 0, 0)
         self.project_list.setSpacing(8)

@@ -125,6 +125,10 @@ class GeoTiffSessionCache:
                 tile_dir=tile_dir,
                 tile_size=int(payload.get("tile_size", 512)),
                 tile_levels=tile_levels,
+                metadata_details={
+                    str(key): str(value)
+                    for key, value in payload.get("metadata_details", {}).items()
+                },
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
@@ -170,6 +174,7 @@ class GeoTiffSessionCache:
                     }
                     for level in info.tile_levels
                 ],
+                "metadata_details": info.metadata_details,
                 "display_scale_percent": key.display_scale_percent,
                 "mtime_ns": key.mtime_ns,
                 "size": key.size,

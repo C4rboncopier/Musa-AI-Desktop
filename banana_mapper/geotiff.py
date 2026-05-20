@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile, mkdtemp
 from typing import Callable, Optional
@@ -54,6 +54,7 @@ class GeoTiffInfo:
     tile_dir: Path | None = None
     tile_size: int = DEFAULT_TILE_SIZE
     tile_levels: tuple[GeoTiffTileLevel, ...] = ()
+    metadata_details: dict[str, str] = field(default_factory=dict)
 
     @property
     def west(self) -> float:
@@ -153,6 +154,7 @@ def load_geotiff_for_leaflet(
 
             _report(cb, 25, "Parsing CRS and computing source bounds...")
             source_crs = CRS.from_user_input(dataset.crs)
+            metadata_details = _collect_metadata_details(dataset)
             bounds_source = (
                 float(dataset.bounds.left),
                 float(dataset.bounds.bottom),
@@ -213,6 +215,7 @@ def load_geotiff_for_leaflet(
                 tile_dir=tile_dir,
                 tile_size=DEFAULT_TILE_SIZE,
                 tile_levels=tile_levels,
+                metadata_details=metadata_details,
             )
     except RasterioIOError as exc:
         raise GeoTiffError("The selected file is not a readable GeoTIFF.") from exc
@@ -231,6 +234,185 @@ def _validate_dataset(dataset: rasterio.DatasetReader) -> None:
         raise GeoTiffError("Invalid raster dimensions or band count.")
     if dataset.bounds.left == dataset.bounds.right or dataset.bounds.bottom == dataset.bounds.top:
         raise GeoTiffError("Invalid spatial extent: bounds have no area.")
+
+
+def _collect_metadata_details(dataset: rasterio.DatasetReader) -> dict[str, str]:
+    raw_tags = _collect_tags(dataset)
+    lookup = {_normalize_tag_key(key): value for key, value in raw_tags.items() if value}
+    details: dict[str, str] = {}
+
+    elevation = _first_tag(
+        lookup,
+        (
+            "gpsaltitude",
+            "exifgpsaltitude",
+            "absolutealtitude",
+            "relativealtitude",
+            "drone-djiabsolutealtitude",
+            "xmpdrone-djiabsolutealtitude",
+            "elevation",
+            "altitude",
+        ),
+    )
+    if elevation:
+        details["Elevation / Altitude"] = _clean_value(elevation)
+
+    camera_parts = []
+    make = _first_tag(lookup, ("make", "exifmake", "camera_make", "cameramake"))
+    model = _first_tag(lookup, ("model", "exifmodel", "camera_model", "cameramodel"))
+    lens = _first_tag(lookup, ("lensmodel", "exiflensmodel", "lens", "lensinfo"))
+    if make:
+        camera_parts.append(_clean_value(make))
+    if model and _clean_value(model) not in camera_parts:
+        camera_parts.append(_clean_value(model))
+    if lens:
+        camera_parts.append(f"Lens: {_clean_value(lens)}")
+    if camera_parts:
+        details["Camera"] = "\n".join(camera_parts)
+
+    capture_time = _first_tag(
+        lookup,
+        (
+            "datetimeoriginal",
+            "exifdatetimeoriginal",
+            "datetime",
+            "exifdatetime",
+            "acquisitiondatetime",
+            "capturetime",
+            "timestamp",
+        ),
+    )
+    if capture_time:
+        details["Capture Time"] = _clean_value(capture_time)
+
+    sensor_settings = []
+    for label, keys in [
+        ("Focal length", ("focallength", "exiffocallength", "calibratedfocallength")),
+        ("Aperture", ("fnumber", "exiffnumber", "aperturevalue")),
+        ("Exposure", ("exposuretime", "exifexposuretime", "shutterspeedvalue")),
+        ("ISO", ("isospeedratings", "photographicsensitivity", "iso")),
+        ("White balance", ("whitebalance", "exifwhitebalance")),
+    ]:
+        value = _first_tag(lookup, keys)
+        if value:
+            sensor_settings.append(f"{label}: {_clean_value(value)}")
+    if sensor_settings:
+        details["Sensor Settings"] = "\n".join(sensor_settings)
+
+    flight_parts = []
+    for label, keys in [
+        ("Flight yaw", ("flightyawdegree", "drone-djiflightyawdegree")),
+        ("Gimbal pitch", ("gimbalpitchdegree", "drone-djigimbalpitchdegree")),
+        ("Gimbal yaw", ("gimbalyawdegree", "drone-djigimbalyawdegree")),
+        ("GPS latitude", ("gpslatitude", "exifgpslatitude")),
+        ("GPS longitude", ("gpslongitude", "exifgpslongitude")),
+    ]:
+        value = _first_tag(lookup, keys)
+        if value:
+            flight_parts.append(f"{label}: {_clean_value(value)}")
+    if flight_parts:
+        details["Flight / GPS"] = "\n".join(flight_parts)
+
+    details["Raster Details"] = "\n".join(
+        [
+            f"Driver: {dataset.driver}",
+            f"Data types: {', '.join(dict.fromkeys(str(dtype) for dtype in dataset.dtypes))}",
+            f"Color interpretation: {', '.join(ci.name for ci in dataset.colorinterp)}",
+        ]
+    )
+
+    compression = _first_tag(lookup, ("compression", "compress", "image_structurecompression"))
+    interleave = _first_tag(lookup, ("interleave", "image_structureinterleave"))
+    structure_parts = []
+    if compression:
+        structure_parts.append(f"Compression: {_clean_value(compression)}")
+    if interleave:
+        structure_parts.append(f"Interleave: {_clean_value(interleave)}")
+    if dataset.nodata is not None:
+        structure_parts.append(f"Nodata: {dataset.nodata}")
+    if structure_parts:
+        details["Storage"] = "\n".join(structure_parts)
+
+    band_parts = []
+    for index in range(1, dataset.count + 1):
+        desc = dataset.descriptions[index - 1] or f"Band {index}"
+        unit = dataset.units[index - 1] if dataset.units and index - 1 < len(dataset.units) else None
+        text = f"{index}: {desc} ({dataset.dtypes[index - 1]})"
+        if unit:
+            text += f", {unit}"
+        band_parts.append(text)
+    if band_parts:
+        details["Band Details"] = "\n".join(band_parts)
+
+    tag_summary = _summarize_extra_tags(raw_tags)
+    if tag_summary:
+        details["Metadata Tags"] = tag_summary
+
+    return details
+
+
+def _collect_tags(dataset: rasterio.DatasetReader) -> dict[str, str]:
+    tags: dict[str, str] = {}
+    namespaces: list[str | None] = [None, "IMAGE_STRUCTURE", "EXIF", "GPS", "RPC"]
+    try:
+        namespaces.extend(ns for ns in dataset.tag_namespaces() if ns not in namespaces)
+    except Exception:
+        pass
+
+    for namespace in namespaces:
+        try:
+            values = dataset.tags(ns=namespace) if namespace else dataset.tags()
+        except Exception:
+            continue
+        prefix = f"{namespace}:" if namespace else ""
+        for key, value in values.items():
+            if value is None:
+                continue
+            tags[f"{prefix}{key}"] = str(value)
+    return tags
+
+
+def _first_tag(lookup: dict[str, str], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = lookup.get(_normalize_tag_key(key))
+        if value:
+            return value
+    return ""
+
+
+def _normalize_tag_key(key: str) -> str:
+    return "".join(char.lower() for char in str(key) if char.isalnum())
+
+
+def _clean_value(value: str, max_chars: int = 180) -> str:
+    text = " ".join(str(value).replace("\x00", " ").split())
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3]}..."
+
+
+def _summarize_extra_tags(tags: dict[str, str], limit: int = 10) -> str:
+    skip = {
+        "area_or_point",
+        "compression",
+        "interleave",
+        "make",
+        "model",
+        "datetime",
+        "datetimeoriginal",
+    }
+    rows = []
+    for key in sorted(tags):
+        normalized = _normalize_tag_key(key)
+        if normalized in skip or "xml" in normalized:
+            continue
+        value = _clean_value(tags[key], 90)
+        if not value:
+            continue
+        rows.append(f"{key}: {value}")
+        if len(rows) >= limit:
+            break
+    return "\n".join(rows)
 
 
 def _bounds_to_wgs84(crs: rasterio.crs.CRS, bounds: tuple[float, float, float, float]) -> tuple[float, float, float, float]:

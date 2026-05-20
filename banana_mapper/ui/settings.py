@@ -9,8 +9,10 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -103,21 +105,37 @@ class SettingsPage(QWidget):
         layout.addLayout(summary)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(8)
-        self.cpu_value = self._add_status_row(grid, 0, "CPU", "Checking", "neutral", "--")
-        self.gpu_value = self._add_status_row(grid, 1, "GPU", "Checking", "neutral", "--")
-        self.torch_value = self._add_status_row(grid, 2, "PyTorch", "Checking", "neutral", "--")
-        self.cuda_value = self._add_status_row(grid, 3, "CUDA", "Checking", "neutral", "--")
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        self.cpu_value = self._add_hardware_tile(grid, 0, 0, "CPU", "Checking", "neutral", "--")
+        self.ram_value = self._add_hardware_tile(grid, 0, 1, "RAM", "Checking", "neutral", "--")
+        self.gpu_value = self._add_hardware_tile(grid, 1, 0, "GPU", "Checking", "neutral", "--")
+        self.torch_value = self._add_hardware_tile(grid, 1, 1, "PyTorch", "Checking", "neutral", "--")
+        self.cuda_value = self._add_hardware_tile(grid, 2, 0, "CUDA", "Checking", "neutral", "--")
+        self.device_value = self._add_hardware_tile(grid, 2, 1, "Device", "Pending", "neutral", "--")
         layout.addLayout(grid)
+
+        self.hardware_progress = QProgressBar()
+        self.hardware_progress.setObjectName("hardwareProgress")
+        self.hardware_progress.setRange(0, 100)
+        self.hardware_progress.setValue(0)
+        self.hardware_progress.setTextVisible(True)
+        layout.addWidget(self.hardware_progress)
+
+        self.hardware_log = QTextEdit()
+        self.hardware_log.setObjectName("diagnosticLog")
+        self.hardware_log.setReadOnly(True)
+        self.hardware_log.setFixedHeight(128)
+        self.hardware_log.setPlaceholderText("Diagnostic output appears here when a hardware check runs.")
+        layout.addWidget(self.hardware_log)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        refresh_btn = QPushButton("Run Hardware Check")
-        refresh_btn.setObjectName("secondaryButton")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(lambda _=False: self.refreshHardwareRequested.emit())
-        actions.addWidget(refresh_btn)
+        self.refresh_btn = QPushButton("Run Hardware Check")
+        self.refresh_btn.setObjectName("secondaryButton")
+        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn.clicked.connect(lambda _=False: self.refreshHardwareRequested.emit())
+        actions.addWidget(self.refresh_btn)
         actions.addStretch(1)
         layout.addLayout(actions)
         return frame
@@ -211,12 +229,22 @@ class SettingsPage(QWidget):
         self.hardware_title.setText(status.issue_title)
         self.hardware_detail.setText(status.issue_detail)
 
-        self._set_status_row(self.cpu_value, "Available", "ok", f"{status.cpu_name} ({status.cpu_cores} cores)")
+        cpu_detail = f"{status.cpu_name}\n{status.cpu_cores} cores / {status.cpu_threads} threads"
+        if status.cpu_clock != "Unavailable":
+            cpu_detail += f" | {status.cpu_clock}"
+        self._set_status_row(self.cpu_value, "Available", "ok", cpu_detail)
+        self._set_status_row(
+            self.ram_value,
+            "Available",
+            "ok",
+            f"{status.ram_total} total\n{status.ram_available} available",
+        )
         gpu = status.gpus[0] if status.gpus else None
         if gpu and gpu.status == "Available":
-            self._set_status_row(self.gpu_value, "Available", "ok", f"{gpu.name} - {gpu.detail}")
+            self._set_status_row(self.gpu_value, "Available", "ok", f"{gpu.name}\n{gpu.detail}")
         elif gpu and gpu.status == "Installed":
-            self._set_status_row(self.gpu_value, "Installed", "neutral", f"{gpu.name} - {gpu.detail}; CUDA unavailable")
+            detail = f"{gpu.name}\n{gpu.detail}; CUDA unavailable" if gpu.detail else f"{gpu.name}\nCUDA unavailable"
+            self._set_status_row(self.gpu_value, "Installed", "neutral", detail)
         else:
             self._set_status_row(self.gpu_value, "Missing", "danger", "No CUDA-ready GPU detected")
 
@@ -227,10 +255,54 @@ class SettingsPage(QWidget):
         cuda_tone = "ok" if status.cuda_available else "danger"
         cuda_state = "Available" if status.cuda_available else "Missing"
         self._set_status_row(self.cuda_value, cuda_state, cuda_tone, status.cuda_version)
+        self._set_status_row(
+            self.device_value,
+            "Selected",
+            "ok" if preference == "gpu" else "neutral",
+            status.device_label if preference == "gpu" and status.has_compatible_gpu else "CPU",
+        )
 
         steps = status.setup_steps or ("No action needed. GPU acceleration is ready for AI mapping.",)
         self.setup_steps.setText("\n".join(f"{index}. {step}" for index, step in enumerate(steps, start=1)))
+        self.hardware_progress.setValue(100)
+        self.refresh_btn.setEnabled(True)
+        self.refresh_btn.setText("Run Hardware Check")
         self.set_device_preference(preference, status)
+
+    def begin_hardware_check(self) -> None:
+        self.hardware_state.setText("Running")
+        self.hardware_state.set_tone("neutral")
+        self.hardware_title.setText("Running hardware diagnostics")
+        self.hardware_detail.setText("Checking processor, memory, GPU, PyTorch, and CUDA availability.")
+        self.hardware_progress.setValue(0)
+        self.hardware_log.clear()
+        self.refresh_btn.setEnabled(False)
+        self.refresh_btn.setText("Checking...")
+        for value in (
+            self.cpu_value,
+            self.ram_value,
+            self.gpu_value,
+            self.torch_value,
+            self.cuda_value,
+            self.device_value,
+        ):
+            self._set_status_row(value, "Checking", "neutral", "--")
+
+    def update_hardware_check_progress(self, percent: int, message: str, level: str = "info") -> None:
+        self.hardware_progress.setValue(max(0, min(100, percent)))
+        prefix = {"ok": "OK", "warning": "WARN", "error": "ERROR"}.get(level, "INFO")
+        self.hardware_log.append(f"[{prefix}] {message}")
+        self.hardware_detail.setText(message)
+
+    def fail_hardware_check(self, error_message: str) -> None:
+        self.hardware_state.setText("Error")
+        self.hardware_state.set_tone("danger")
+        self.hardware_title.setText("Hardware check failed")
+        self.hardware_detail.setText(error_message)
+        self.hardware_progress.setValue(0)
+        self.hardware_log.append(f"[ERROR] {error_message}")
+        self.refresh_btn.setEnabled(True)
+        self.refresh_btn.setText("Run Hardware Check")
 
     def set_device_preference(self, preference: str, status: HardwareStatus | None = None) -> None:
         status = status or self._hardware
@@ -267,16 +339,26 @@ class SettingsPage(QWidget):
             self.devicePreferenceChanged.emit(str(value))
 
     @staticmethod
-    def _add_status_row(grid: QGridLayout, row: int, label: str, state: str, tone: str, detail: str) -> QLabel:
+    def _add_hardware_tile(grid: QGridLayout, row: int, column: int, label: str, state: str, tone: str, detail: str) -> QLabel:
+        tile = QFrame()
+        tile.setObjectName("hardwareInfoCard")
+        layout = QVBoxLayout(tile)
+        layout.setContentsMargins(10, 9, 10, 10)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        header.setSpacing(8)
         key = QLabel(label.upper())
-        key.setObjectName("metaKey")
+        key.setObjectName("hardwareLabel")
         pill = StatusPill(state, tone)
         value = QLabel(detail)
-        value.setObjectName("metaValue")
+        value.setObjectName("hardwareValue")
         value.setWordWrap(True)
-        grid.addWidget(key, row, 0)
-        grid.addWidget(pill, row, 1)
-        grid.addWidget(value, row, 2)
+        header.addWidget(key)
+        header.addStretch(1)
+        header.addWidget(pill)
+        layout.addLayout(header)
+        layout.addWidget(value, 1)
+        grid.addWidget(tile, row, column)
         value._status_pill = pill  # type: ignore[attr-defined]
         return value
 
