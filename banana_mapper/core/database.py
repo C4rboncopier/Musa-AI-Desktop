@@ -23,13 +23,21 @@ def default_database_path() -> Path:
     """Return the local application database path.
 
     The app stores metadata in a small SQLite database beside the application
-    workspace by default. The location can be overridden for deployment or
-    tests with ``BANANA_MAPPER_HOME``.
+    workspace during development and under the user's local app data folder in
+    packaged builds. The location can be overridden for deployment or tests
+    with ``BANANA_MAPPER_HOME``.
     """
 
     import os
+    import sys
 
-    root = Path(os.environ.get("BANANA_MAPPER_HOME", Path.cwd() / ".banana_mapper"))
+    configured_home = os.environ.get("BANANA_MAPPER_HOME", "")
+    if configured_home:
+        root = Path(configured_home)
+    elif getattr(sys, "frozen", False):
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Musa AI"
+    else:
+        root = Path.cwd() / ".banana_mapper"
     root.mkdir(parents=True, exist_ok=True)
     return root / DB_FILENAME
 

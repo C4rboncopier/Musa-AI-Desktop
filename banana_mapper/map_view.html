@@ -127,11 +127,21 @@
       height: 10px;
       width: 16px;
     }
+    .geotiff-fallback-overlay,
     .geotiff-image-overlay,
     .geotiff-image-tile {
       backface-visibility: hidden;
       image-rendering: auto;
+      pointer-events: none;
+      transform: translateZ(0);
       will-change: transform, opacity;
+    }
+    .geotiff-image-tile {
+      opacity: 0;
+      transition: opacity 140ms linear;
+    }
+    .geotiff-image-tile.loaded {
+      opacity: 1;
     }
   </style>
 </head>
@@ -209,7 +219,7 @@
       return;
     }
     map = L.map("map", {
-      zoomControl: true,
+      zoomControl: false,
       preferCanvas: true,
       worldCopyJump: false,
       zoomAnimation: true,
@@ -227,13 +237,12 @@
       pendingMouseLatLng = e.latlng;
       if (!coordFrame) coordFrame = L.Util.requestAnimFrame(flushMousePosition);
     });
+    map.on("click", handleDetectionClick);
     map.on("zoomend", function() {
       if (bridge) bridge.reportZoom(map.getZoom());
       scheduleDetectionRender();
     });
-    map.on("move zoom resize moveend zoomend viewreset", function() {
-      scheduleMapRefresh(500);
-    });
+    map.on("resize viewreset", function() { scheduleMapRefresh(250); });
     map.on("moveend resize", function() { scheduleDetectionRender(false); });
 
     if (typeof qt !== "undefined" && qt.webChannelTransport) {
@@ -364,17 +373,14 @@
 
   function scheduleMapRefresh(durationMs) {
     if (!map) return;
-    mapRefreshUntil = Math.max(mapRefreshUntil, Date.now() + (durationMs || 500));
+    mapRefreshUntil = Math.max(mapRefreshUntil, Date.now() + (durationMs || 120));
     if (mapRefreshTimer) return;
-    mapRefreshTimer = setInterval(function() {
-      if (!map || Date.now() > mapRefreshUntil) {
-        clearInterval(mapRefreshTimer);
-        mapRefreshTimer = null;
-        return;
-      }
+    mapRefreshTimer = setTimeout(function() {
+      mapRefreshTimer = null;
+      if (!map) return;
       map.invalidateSize({ animate: false, pan: false });
       if (imageOverlay && imageOverlay.refresh) imageOverlay.refresh();
-    }, 160);
+    }, 80);
   }
 
   function createMapPanes() {
@@ -398,7 +404,7 @@
       coordEl.textContent = ll.lat.toFixed(7) + ",  " + ll.lng.toFixed(7);
       lastCoordTextAt = now;
     }
-    if (bridge && now - lastBridgeCoordAt > 250) {
+    if (bridge && now - lastBridgeCoordAt > 900) {
       bridge.reportCoordinates(ll.lat, ll.lng);
       lastBridgeCoordAt = now;
     }
@@ -426,11 +432,15 @@
       this._pruneTimer = null;
       this._resetFrame = null;
       this._refreshFrame = null;
+      this._moveTimer = null;
+      this._fallbackLayer = null;
+      this._fallbackReady = false;
     },
 
     onAdd: function(mapInstance) {
       this._map = mapInstance;
-      this._map.on("move zoom resize moveend zoomend viewreset", this._scheduleReset, this);
+      this._map.on("move", this._scheduleMoveReset, this);
+      this._map.on("moveend zoomend resize viewreset", this._scheduleReset, this);
       this._scheduleReset();
     },
 
@@ -447,15 +457,25 @@
         clearTimeout(this._pruneTimer);
         this._pruneTimer = null;
       }
-      if (this._map) {
-        this._map.off("move zoom resize moveend zoomend viewreset", this._scheduleReset, this);
+      if (this._moveTimer) {
+        clearTimeout(this._moveTimer);
+        this._moveTimer = null;
       }
+      if (this._map) {
+        this._map.off("move", this._scheduleMoveReset, this);
+        this._map.off("moveend zoomend resize viewreset", this._scheduleReset, this);
+      }
+      if (this._fallbackLayer && this._map) {
+        this._map.removeLayer(this._fallbackLayer);
+      }
+      this._fallbackLayer = null;
       this._removeAllTiles();
       this._map = null;
     },
 
     setOpacity: function(opacity) {
       this.options.opacity = opacity;
+      if (this._fallbackLayer) this._fallbackLayer.setOpacity(opacity);
       Object.keys(this._tiles).forEach(function(key) {
         this._tiles[key].setOpacity(opacity);
       }, this);
@@ -468,12 +488,21 @@
       this._resetFrame = L.Util.requestAnimFrame(this._reset, this);
     },
 
+    _scheduleMoveReset: function() {
+      if (!this._map || this._moveTimer) return;
+      this._moveTimer = setTimeout(function() {
+        this._moveTimer = null;
+        this._scheduleReset();
+      }.bind(this), 140);
+    },
+
     _reset: function() {
       this._resetFrame = null;
       if (!this._map || !this._levels.length || !this._baseUrl) {
         this._removeAllTiles();
         return;
       }
+      this._ensureFallbackLayer();
 
       var intersection = this._viewIntersection();
       if (!intersection) {
@@ -503,7 +532,23 @@
         this._wantedSince = Date.now();
       }
       this._schedulePrune(wanted);
-      this._requestRefresh();
+    },
+
+    _ensureFallbackLayer: function() {
+      if (this._fallbackLayer || !this._map || !this._levels.length) return;
+      var fallbackLevel = this._levels[0];
+      var url = this._baseUrl + fallbackLevel.index + "/0_0.png";
+      this._fallbackLayer = L.imageOverlay(url, this._bounds, {
+        opacity: this.options.opacity,
+        interactive: false,
+        crossOrigin: false,
+        zIndex: (this.options.zIndex || 300) - 2,
+        pane: this.options.pane,
+        className: "geotiff-fallback-overlay"
+      }).addTo(this._map);
+      this._fallbackLayer.once("load", function() {
+        this._fallbackReady = true;
+      }, this);
     },
 
     _selectLevel: function() {
@@ -524,7 +569,7 @@
     },
 
     _viewIntersection: function() {
-      var view = this._map.getBounds().pad(0.15);
+      var view = this._map.getBounds().pad(0.85);
       var west = Math.max(this._bounds.getWest(), view.getWest());
       var east = Math.min(this._bounds.getEast(), view.getEast());
       var south = Math.max(this._bounds.getSouth(), view.getSouth());
@@ -545,10 +590,10 @@
       if (rightPx <= leftPx || bottomPx <= topPx) return null;
 
       return {
-        x0: clamp(Math.floor(leftPx / this._tileSize), 0, level.cols - 1),
-        x1: clamp(Math.floor((rightPx - 1) / this._tileSize), 0, level.cols - 1),
-        y0: clamp(Math.floor(topPx / this._tileSize), 0, level.rows - 1),
-        y1: clamp(Math.floor((bottomPx - 1) / this._tileSize), 0, level.rows - 1)
+        x0: clamp(Math.floor(leftPx / this._tileSize) - 1, 0, level.cols - 1),
+        x1: clamp(Math.floor((rightPx - 1) / this._tileSize) + 1, 0, level.cols - 1),
+        y0: clamp(Math.floor(topPx / this._tileSize) - 1, 0, level.rows - 1),
+        y1: clamp(Math.floor((bottomPx - 1) / this._tileSize) + 1, 0, level.rows - 1)
       };
     },
 
@@ -566,9 +611,13 @@
           zIndex: this.options.zIndex || 300,
           pane: this.options.pane,
           className: "geotiff-image-tile"
-        }).addTo(this._map);
+        });
+        layer.once("load", function() {
+          var element = layer.getElement && layer.getElement();
+          if (element) element.classList.add("loaded");
+        });
         this._tiles[key] = layer;
-        this._requestRefresh();
+        layer.addTo(this._map);
       }, this);
     },
 
@@ -581,7 +630,7 @@
       img.onload = function() {
         this._imageCache[url] = true;
         this._cacheOrder.push(url);
-        while (this._cacheOrder.length > 640) {
+        while (this._cacheOrder.length > 1400) {
           var stale = this._cacheOrder.shift();
           delete this._imageCache[stale];
         }
@@ -633,27 +682,18 @@
           return;
         }
         if (this._map) this._pruneTiles(wanted);
-      }.bind(this), 420);
+      }.bind(this), 1200);
     },
 
     _hasPendingWantedTiles: function(wanted) {
-      if (Date.now() - this._wantedSince > 2500) return false;
+      if (Date.now() - this._wantedSince > 8000) return false;
       return Object.keys(wanted).some(function(key) {
         return this._loading[key] || !this._tiles[key];
       }, this);
     },
 
-    _requestRefresh: function() {
-      if (!this._map || this._refreshFrame) return;
-      this._refreshFrame = L.Util.requestAnimFrame(function() {
-        this._refreshFrame = null;
-        if (this._map) this._map.invalidateSize({ animate: false, pan: false });
-      }, this);
-    },
-
     refresh: function() {
       this._scheduleReset();
-      this._requestRefresh();
       return this;
     },
 
@@ -853,6 +893,29 @@
     }
   }
 
+  function handleDetectionClick(e) {
+    if (!map || !detectionLayers.length || detectionOpacity <= 0) return;
+    var clickPoint = map.latLngToContainerPoint(e.latlng);
+    var best = null;
+    var bestDistance = Infinity;
+    var threshold = Math.max(10, Math.min(16, 10 + map.getZoom() * 0.18));
+    for (var i = 0; i < detectionLayers.length; i++) {
+      var layer = detectionLayers[i];
+      if (!layer || !layer._record) continue;
+      var point = map.latLngToContainerPoint(layer.getLatLng());
+      var distance = point.distanceTo(clickPoint);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = layer._record;
+      }
+    }
+    if (!best || bestDistance > threshold) return;
+    L.popup({ maxWidth: 320 })
+      .setLatLng([best._lat, best._lng])
+      .setContent(buildPopup(best))
+      .openOn(map);
+  }
+
   function recordIsVisible(rec) {
     var keys = rec._layerKeys || [];
     for (var i = 0; i < keys.length; i++) {
@@ -888,7 +951,7 @@
       weight: scaledPointWeight(),
       pane: "detectionPane",
       renderer: pointRenderer,
-      interactive: true
+      interactive: false
     };
   }
 

@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
         self._current_base_map = str(self.repo.get_preference("base_map", "osm") or "osm")
         if self._current_base_map not in BASE_MAPS:
             self._current_base_map = "osm"
-        self._google_maps_api_key = _load_google_maps_api_key()
+        self._google_maps_api_key = _load_google_maps_api_key(self._google_maps_secret_path())
         if self._current_base_map.startswith("google_") and not self._google_maps_api_key:
             self._current_base_map = "osm"
 
@@ -192,12 +192,7 @@ class MainWindow(QMainWindow):
         status = QStatusBar(self)
         status.setObjectName("statusBar")
         self.setStatusBar(status)
-        self.project_status = QLabel("Project: none")
-        self.zoom_status = QLabel("Zoom: --")
-        self.db_status = QLabel(f"DB: {self.repo.db_path.name}")
-        status.addWidget(self.project_status, 2)
-        status.addPermanentWidget(self.db_status, 1)
-        status.addPermanentWidget(self.zoom_status, 1)
+        self.statusBar().showMessage("Ready.", 2500)
 
     def _connect_signals(self) -> None:
         self.dashboard.createRequested.connect(self.create_project)
@@ -220,6 +215,7 @@ class MainWindow(QMainWindow):
         self.settings.openDatabaseFolderRequested.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.repo.db_path.parent)))
         )
+        self.settings.googleMapsApiKeyChanged.connect(self._set_google_maps_api_key)
 
         self.workspace.backRequested.connect(self.show_dashboard)
         self.workspace.importGeoTiffRequested.connect(self.open_geotiff)
@@ -323,6 +319,7 @@ class MainWindow(QMainWindow):
             self.output_manager.root_dir,
             self.geotiff_cache.cache_dir,
         )
+        self.settings.set_google_maps_api_key_configured(bool(self._google_maps_api_key))
 
     def _selected_inference_device(self) -> str:
         return inference_device_arg(self.processing_device_preference, self.hardware_status)
@@ -411,7 +408,6 @@ class MainWindow(QMainWindow):
             self.current_bundle = self.repo.get_bundle(project_id)
             self.workspace.set_project(self.current_bundle)
             self.refresh_project_outputs()
-            self.project_status.setText(f"Project: {self.current_bundle.project.name}")
             self.workspace.append_log("Project title and description updated.")
         self.refresh_dashboard()
         self.statusBar().showMessage("Project details updated.", 3500)
@@ -450,7 +446,6 @@ class MainWindow(QMainWindow):
             self.latest_mapping_result = None
             self.pending_geotiff = None
             self.pending_mapping = None
-            self.project_status.setText("Project: none")
 
         self.repo.delete_project(project_id)
         self.refresh_dashboard()
@@ -503,7 +498,6 @@ class MainWindow(QMainWindow):
 
         self.workspace.set_project(self.current_bundle)
         self.refresh_project_outputs()
-        self.project_status.setText(f"Project: {self.current_bundle.project.name}")
         self.stack.setCurrentWidget(self.workspace)
         self.workspace.append_log(f"Opened project {self.current_bundle.project.name}.")
         self._log_missing_paths(self.current_bundle)
@@ -1386,14 +1380,12 @@ class MainWindow(QMainWindow):
             return
         if base_map.startswith("google_") and not self._google_maps_api_key:
             self.workspace.set_base_map(self._current_base_map)
-            self.statusBar().showMessage("Add GOOGLE_MAPS_API_KEY to .env to enable Google basemaps.", 6000)
+            self.statusBar().showMessage("Add your Google Maps API key in Settings to enable Google Satellite.", 6000)
             QMessageBox.information(
                 self,
                 "Google Maps API key required",
-                "Google basemaps need a Google Maps Platform API key.\n\n"
-                "Create a local .env file in the project folder and add:\n"
-                "GOOGLE_MAPS_API_KEY=your_key_here\n\n"
-                "The .env file is ignored by git.",
+                "Google Satellite needs your own Google Maps Platform API key.\n\n"
+                "Open Settings, paste your key under Map Services, then select Google Satellite again.",
             )
             return
         self._current_base_map = base_map
@@ -1417,6 +1409,20 @@ class MainWindow(QMainWindow):
         }
         self._run_js(f"setBaseMap({json.dumps(payload)});")
 
+    def _set_google_maps_api_key(self, api_key: str) -> None:
+        self._google_maps_api_key = api_key.strip()
+        _save_google_maps_api_key(self._google_maps_secret_path(), self._google_maps_api_key)
+        self.settings.set_google_maps_api_key_configured(bool(self._google_maps_api_key))
+        if self._current_base_map.startswith("google_") and not self._google_maps_api_key:
+            self._current_base_map = "osm"
+            self.repo.set_preference("base_map", "osm")
+        self._push_base_map_to_map()
+        message = "Google Maps API key saved locally." if self._google_maps_api_key else "Google Maps API key cleared."
+        self.statusBar().showMessage(message, 4000)
+
+    def _google_maps_secret_path(self) -> Path:
+        return self.repo.db_path.parent / "google_maps.env"
+
     def _run_js(self, script: str) -> None:
         self.workspace.map_view.page().runJavaScript(script)
 
@@ -1424,8 +1430,6 @@ class MainWindow(QMainWindow):
         self.workspace.set_coordinates(latitude, longitude)
 
     def _update_zoom(self, zoom: int) -> None:
-        text = f"Zoom: {zoom}"
-        self.zoom_status.setText(text)
         self.workspace.set_zoom(zoom)
 
     # ------------------------------------------------------------------
@@ -1534,16 +1538,15 @@ def _record_from_payload(payload: dict) -> DetectionRecord:
     return DetectionRecord(**clean)
 
 
-def _load_google_maps_api_key() -> str:
+def _load_google_maps_api_key(secret_path: Path) -> str:
     for name in ("GOOGLE_MAPS_API_KEY", "MUSA_GOOGLE_MAPS_API_KEY"):
         value = os.environ.get(name, "").strip()
         if value:
             return value
-    env_path = Path.cwd() / ".env"
-    if not env_path.exists():
+    if not secret_path.exists():
         return ""
     try:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
+        for line in secret_path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
@@ -1553,6 +1556,14 @@ def _load_google_maps_api_key() -> str:
     except OSError:
         return ""
     return ""
+
+
+def _save_google_maps_api_key(secret_path: Path, api_key: str) -> None:
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    if not api_key:
+        secret_path.unlink(missing_ok=True)
+        return
+    secret_path.write_text(f"GOOGLE_MAPS_API_KEY={api_key}\n", encoding="utf-8")
 
 
 def run() -> None:

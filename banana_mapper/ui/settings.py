@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -30,6 +31,7 @@ class SettingsPage(QWidget):
     clearCacheRequested = pyqtSignal()
     openOutputRootRequested = pyqtSignal()
     openDatabaseFolderRequested = pyqtSignal()
+    googleMapsApiKeyChanged = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -77,6 +79,7 @@ class SettingsPage(QWidget):
 
         layout.addWidget(self._build_hardware_card())
         layout.addWidget(self._build_processing_card())
+        layout.addWidget(self._build_maps_card())
         layout.addWidget(self._build_setup_card())
         layout.addWidget(self._build_storage_card())
         layout.addStretch(1)
@@ -183,6 +186,50 @@ class SettingsPage(QWidget):
         actions.addWidget(nvidia_btn)
         actions.addStretch(1)
         layout.addLayout(actions)
+        return frame
+
+    def _build_maps_card(self) -> QFrame:
+        frame = card("Map Services")
+        layout = frame.layout()
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        label_col = QVBoxLayout()
+        label_col.setSpacing(3)
+        title = QLabel("Google Satellite basemap")
+        title.setObjectName("panelTitle")
+        body = QLabel("Enter your own Google Maps Platform API key to enable the Google Satellite basemap.")
+        body.setObjectName("bodyText")
+        body.setWordWrap(True)
+        label_col.addWidget(title)
+        label_col.addWidget(body)
+        self.google_maps_state = StatusPill("Not set", "neutral")
+        row.addLayout(label_col, 1)
+        row.addWidget(self.google_maps_state, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(row)
+
+        key_row = QHBoxLayout()
+        key_row.setSpacing(8)
+        self.google_maps_key_edit = QLineEdit()
+        self.google_maps_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.google_maps_key_edit.setPlaceholderText("Paste Google Maps Platform API key")
+        save_btn = QPushButton("Save Key")
+        save_btn.setObjectName("secondaryButton")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.clicked.connect(lambda _=False: self.googleMapsApiKeyChanged.emit(self.google_maps_key_edit.text().strip()))
+        clear_btn = QPushButton("Clear")
+        clear_btn.setObjectName("secondaryButton")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.clicked.connect(lambda _=False: self.googleMapsApiKeyChanged.emit(""))
+        key_row.addWidget(self.google_maps_key_edit, 1)
+        key_row.addWidget(save_btn)
+        key_row.addWidget(clear_btn)
+        layout.addLayout(key_row)
+
+        hint = QLabel("The key is stored locally for this user and is not included in source control or installers.")
+        hint.setObjectName("infoLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         return frame
 
     def _build_storage_card(self) -> QFrame:
@@ -330,6 +377,14 @@ class SettingsPage(QWidget):
 
     def set_sync_status(self, text: str) -> None:
         self.sync_value.setText(text)
+
+    def set_google_maps_api_key_configured(self, configured: bool) -> None:
+        self.google_maps_state.setText("Configured" if configured else "Not set")
+        self.google_maps_state.set_tone("ok" if configured else "neutral")
+        self.google_maps_key_edit.clear()
+        self.google_maps_key_edit.setPlaceholderText(
+            "Google Maps API key saved locally" if configured else "Paste Google Maps Platform API key"
+        )
 
     def _on_device_changed(self, _index: int) -> None:
         if self._syncing_device:

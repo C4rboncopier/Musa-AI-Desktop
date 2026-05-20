@@ -317,7 +317,6 @@ class WorkspacePage(QWidget):
             ("+", self.zoomInRequested),
             ("-", self.zoomOutRequested),
             ("Fit", self.fitMapRequested),
-            ("Reset", self.resetViewRequested),
         ]:
             btn = QToolButton()
             btn.setText(text)
