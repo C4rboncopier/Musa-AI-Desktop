@@ -10,8 +10,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .detection import MappingResult, run_funnel_mapping, run_funnel_mapping_geotiff
-from .geotiff import DEFAULT_MAX_PREVIEW_PIXELS, GeoTiffError, GeoTiffInfo, load_geotiff_for_leaflet
+from .detection import MappingResult, run_funnel_mapping_geotiff
+from .geotiff import DEFAULT_PREVIEW_SCALE, GeoTiffError, GeoTiffInfo, load_geotiff_for_leaflet
 
 
 class GeoTiffCancelled(RuntimeError):
@@ -37,19 +37,19 @@ class GeoTiffWorker(QThread):
     def __init__(
         self,
         path: str | Path,
-        max_preview_pixels: int = DEFAULT_MAX_PREVIEW_PIXELS,
+        preview_scale: float = DEFAULT_PREVIEW_SCALE,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._path = path
-        self._max_preview_pixels = max_preview_pixels
+        self._preview_scale = preview_scale
 
     def run(self) -> None:
         """Entry point executed on the worker thread."""
         try:
             info = load_geotiff_for_leaflet(
                 self._path,
-                max_preview_pixels=self._max_preview_pixels,
+                preview_scale=self._preview_scale,
                 progress_callback=self._on_progress,
             )
             self.finished.emit(info)
@@ -64,48 +64,6 @@ class GeoTiffWorker(QThread):
         """Forward progress reports from the pipeline to the UI thread."""
         if self.isInterruptionRequested():
             raise GeoTiffCancelled()
-        self.progress.emit(percent, message)
-
-
-class AiMappingWorker(QThread):
-    """Worker thread that runs the two-model leaf disease funnel."""
-
-    progress: pyqtSignal = pyqtSignal(int, str)
-    finished: pyqtSignal = pyqtSignal(object)   # MappingResult
-    failed: pyqtSignal = pyqtSignal(str)
-
-    def __init__(
-        self,
-        image_folder: str | Path,
-        leaf_model_path: str | Path,
-        disease_model_path: str | Path,
-        output_dir: str | Path | None = None,
-        device: str | int | None = None,
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self._image_folder = image_folder
-        self._leaf_model_path = leaf_model_path
-        self._disease_model_path = disease_model_path
-        self._output_dir = output_dir
-        self._device = device
-
-    def run(self) -> None:
-        try:
-            result = run_funnel_mapping(
-                self._image_folder,
-                self._leaf_model_path,
-                self._disease_model_path,
-                output_dir=self._output_dir,
-                device=self._device,
-                progress_callback=self._on_progress,
-                should_stop=self.isInterruptionRequested,
-            )
-            self.finished.emit(result)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-    def _on_progress(self, percent: int, message: str) -> None:
         self.progress.emit(percent, message)
 
 

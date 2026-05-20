@@ -444,6 +444,15 @@ class ProjectRepository:
             ).fetchone()
         return _loads(row["value_json"], default) if row else default
 
+    def remove_config(self, project_id: str, key: str) -> None:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM processing_configs WHERE project_id = ? AND key = ?",
+                (project_id, key),
+            )
+            conn.execute("UPDATE projects SET modified_at = ? WHERE id = ?", (now, project_id))
+
     def set_preference(self, key: str, value: Any) -> None:
         now = utc_now_iso()
         with self._connect() as conn:

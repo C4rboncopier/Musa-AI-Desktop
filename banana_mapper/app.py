@@ -54,7 +54,7 @@ from .ui.dashboard import DashboardPage
 from .ui.dialogs import EditProjectDialog, NewProjectDialog, PreferredModelsDialog
 from .ui.settings import SettingsPage
 from .ui.workspace import WorkspacePage
-from .worker import AiGeotiffMappingWorker, AiMappingWorker, GeoTiffWorker
+from .worker import AiGeotiffMappingWorker, GeoTiffWorker
 
 
 class MainWindow(QMainWindow):
@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         self.pending_geotiff: GeoTiffInfo | None = None
         self.pending_mapping: MappingResult | None = None
         self._active_worker: GeoTiffWorker | None = None
-        self._active_mapping_worker: AiMappingWorker | AiGeotiffMappingWorker | None = None
+        self._active_mapping_worker: AiGeotiffMappingWorker | None = None
         self._loading_dialog: LoadingDialog | None = None
         self._mapping_dialog: LoadingDialog | None = None
         self._project_open_dialog: LoadingDialog | None = None
@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._apply_theme(self._current_theme_name)
         self._ensure_all_project_output_dirs()
+        self._cleanup_removed_feature_assets()
         self._update_settings_page()
         self.refresh_dashboard()
         self.workspace.load_map()
@@ -208,13 +209,7 @@ class MainWindow(QMainWindow):
 
         self.workspace.backRequested.connect(self.show_dashboard)
         self.workspace.importGeoTiffRequested.connect(self.open_geotiff)
-        self.workspace.imageFolderRequested.connect(self.select_unstitched_folder)
-        self.workspace.mrkFileRequested.connect(self.select_mrk_file)
-        self.workspace.leafModelRequested.connect(lambda: self.load_model("leaf"))
-        self.workspace.diseaseModelRequested.connect(lambda: self.load_model("disease"))
         self.workspace.runMappingRequested.connect(self.run_ai_mapping)
-        self.workspace.pinCheckerRequested.connect(self.open_pin_checker)
-        self.workspace.clearPinRequested.connect(self.clear_map_pin)
         self.workspace.fitMapRequested.connect(self.fit_overlay)
         self.workspace.resetViewRequested.connect(self.reset_view)
         self.workspace.zoomInRequested.connect(lambda: self._run_js("zoomIn();"))
@@ -446,6 +441,7 @@ class MainWindow(QMainWindow):
         output_dir = self._ensure_project_output_dir(project.id, project.name)
         self._set_project_geotiff_cache(output_dir)
         self.current_bundle = self.repo.get_bundle(project_id)
+        self._apply_project_resolution(project_id)
         self.current_geotiff = None
         self.latest_mapping_result = None
         self.pending_geotiff = None
@@ -475,7 +471,7 @@ class MainWindow(QMainWindow):
             dialog.set_progress(18, "Restoring linked GeoTIFF...")
             cached = self.geotiff_cache.get(
                 geotiff_asset.path,
-                self.workspace.selected_resolution_pixels(),
+                self.workspace.selected_resolution_percent(),
             )
             if cached is not None:
                 QTimer.singleShot(60, lambda info=cached: self._finish_project_open_with_geotiff(info, cached=True))
@@ -487,7 +483,7 @@ class MainWindow(QMainWindow):
 
             self._active_worker = GeoTiffWorker(
                 geotiff_asset.path,
-                max_preview_pixels=self.workspace.selected_resolution_pixels(),
+                preview_scale=self.workspace.selected_resolution_scale(),
                 parent=self,
             )
             dialog.cancel_requested.connect(
@@ -541,7 +537,7 @@ class MainWindow(QMainWindow):
         self._project_open_dialog.set_progress(100, "Project ready.")
         self._project_open_dialog.finish()
         self._project_open_dialog = None
-        self.statusBar().showMessage("Project loaded. Link or import assets to start mapping.", 3500)
+        self.statusBar().showMessage("Project loaded. Import a GeoTIFF to start mapping.", 3500)
 
     def _on_project_open_progress(self, percent: int, message: str) -> None:
         if self.sender() is not self._active_worker:
@@ -564,7 +560,7 @@ class MainWindow(QMainWindow):
 
         self._active_worker = None
         info: GeoTiffInfo = info_obj  # type: ignore[assignment]
-        self.geotiff_cache.put(info, self.workspace.selected_resolution_pixels())
+        self.geotiff_cache.put(info, self.workspace.selected_resolution_percent())
         self._finish_project_open_with_geotiff(info)
 
     def _on_project_geotiff_failed(self, error_message: str) -> None:
@@ -654,12 +650,74 @@ class MainWindow(QMainWindow):
             "resolution",
             {
                 "index": index,
-                "rendering_max_preview_pixels": self.workspace.selected_resolution_pixels(),
+                "display_scale_percent": self.workspace.selected_resolution_percent(),
+                "display_scale": self.workspace.selected_resolution_scale(),
                 "ai_processing": "native_geotiff_resolution",
                 "label": label,
             },
         )
-        self.statusBar().showMessage("Rendering resolution saved. AI analysis remains native resolution.", 3500)
+        self.statusBar().showMessage("Display resolution saved. AI analysis remains native resolution.", 3500)
+        if self.current_geotiff is not None:
+            self._reload_current_geotiff_for_display_scale()
+
+    def _apply_project_resolution(self, project_id: str) -> None:
+        config = self.repo.get_config(project_id, "resolution", {})
+        index = int(config.get("index", 0) or 0) if isinstance(config, dict) else 0
+        index = max(0, min(index, 3))
+        self.workspace.set_resolution_index(index)
+
+    def _cleanup_removed_feature_assets(self) -> None:
+        for project in self.repo.list_projects():
+            removed_types = {
+                asset.asset_type
+                for asset in self.repo.list_assets(project.id)
+                if asset.asset_type in {"image_folder", "mrk_file"}
+            }
+            for asset_type in removed_types:
+                self.repo.remove_asset(project.id, asset_type)
+            last_mapping = self.repo.get_config(project.id, "last_mapping", {})
+            if isinstance(last_mapping, dict) and last_mapping.get("source") == "image_folder":
+                self.repo.remove_config(project.id, "last_mapping")
+
+    def _reload_current_geotiff_for_display_scale(self) -> None:
+        if self.current_geotiff is None:
+            return
+        if self._active_worker is not None and self._active_worker.isRunning():
+            self.statusBar().showMessage("Wait for the current GeoTIFF operation to finish.", 3500)
+            return
+
+        path = self.current_geotiff.file_path
+        cached = self.geotiff_cache.get(path, self.workspace.selected_resolution_percent())
+        if cached is not None:
+            self._apply_geotiff_info(cached, log_message=f"Updated GeoTIFF display scale: {cached.file_name}")
+            self.statusBar().showMessage("GeoTIFF display scale updated from cache.", 3500)
+            return
+
+        self._loading_dialog = LoadingDialog(
+            file_name=path.name,
+            theme_name=self._current_theme_name,
+            parent=self,
+            title="Updating GeoTIFF Display",
+        )
+        dialog = self._loading_dialog
+        dialog.cancel_requested.connect(
+            lambda: self._cancel_geotiff_worker("GeoTIFF display update cancelled.")
+        )
+        self._active_worker = GeoTiffWorker(
+            path,
+            preview_scale=self.workspace.selected_resolution_scale(),
+            parent=self,
+        )
+        self._active_worker.progress.connect(self._on_load_progress)
+        self._active_worker.finished.connect(self._on_load_finished)
+        self._active_worker.failed.connect(self._on_load_failed)
+        self._active_worker.start()
+        self.workspace.append_log(
+            f"Updating GeoTIFF display scale to {self.workspace.selected_resolution_percent()}%: {path}"
+        )
+        dialog.exec()
+        if dialog.was_cancelled and self._active_worker is not None:
+            self._active_worker.requestInterruption()
 
     def _require_project(self) -> ProjectBundle | None:
         if self.current_bundle is not None:
@@ -674,7 +732,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Project required",
-            "Create or open a project before linking datasets or running AI mapping.",
+            "Create or open a project before importing a GeoTIFF or running AI mapping.",
         )
         self.show_dashboard()
         return None
@@ -776,7 +834,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        cached = self.geotiff_cache.get(path, self.workspace.selected_resolution_pixels())
+        cached = self.geotiff_cache.get(path, self.workspace.selected_resolution_percent())
         if cached is not None:
             self._apply_geotiff_info(cached, log_message=f"Reused cached GeoTIFF: {cached.file_name}")
             self.statusBar().showMessage("GeoTIFF restored from session cache.", 3500)
@@ -796,7 +854,7 @@ class MainWindow(QMainWindow):
 
         self._active_worker = GeoTiffWorker(
             path,
-            max_preview_pixels=self.workspace.selected_resolution_pixels(),
+            preview_scale=self.workspace.selected_resolution_scale(),
             parent=self,
         )
         self._active_worker.progress.connect(self._on_load_progress)
@@ -828,7 +886,7 @@ class MainWindow(QMainWindow):
         self._active_worker = None
         self._loading_dialog = None
         info: GeoTiffInfo = info_obj  # type: ignore[assignment]
-        self.geotiff_cache.put(info, self.workspace.selected_resolution_pixels())
+        self.geotiff_cache.put(info, self.workspace.selected_resolution_percent())
         self._apply_geotiff_info(info, log_message=f"GeoTIFF overlay loaded: {info.file_name}")
         self.statusBar().showMessage("GeoTIFF overlay loaded and autosaved to project.", 5000)
 
@@ -857,46 +915,6 @@ class MainWindow(QMainWindow):
             self._project_open_dialog = None
         self.workspace.append_log(message)
         self.statusBar().showMessage(message, 3000)
-
-    def select_unstitched_folder(self) -> None:
-        bundle = self._require_project()
-        if bundle is None:
-            return
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select folder of unstitched drone images",
-            bundle.image_folder_path or "",
-        )
-        if not folder:
-            return
-        self.repo.upsert_asset(bundle.project.id, "image_folder", folder, label=Path(folder).name)
-        self._reload_current_bundle()
-        self.workspace.append_log(f"Linked image folder: {folder}")
-        self.statusBar().showMessage("Image folder linked.", 3500)
-
-    def select_mrk_file(self) -> None:
-        bundle = self._require_project()
-        if bundle is None:
-            return
-        current = bundle.first_asset("mrk_file")
-        start_dir = current.path if current else bundle.image_folder_path or ""
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select DJI MRK file for Coordinate QA",
-            start_dir,
-            "DJI MRK files (*.MRK *.mrk);;Text files (*.txt);;All files (*.*)",
-        )
-        if not path:
-            return
-        self.repo.upsert_asset(
-            bundle.project.id,
-            "mrk_file",
-            path,
-            label=Path(path).name,
-        )
-        self._reload_current_bundle()
-        self.workspace.append_log(f"Linked MRK file for Coordinate QA: {path}")
-        self.statusBar().showMessage("MRK file linked for Coordinate QA.", 3500)
 
     def open_project_output_folder(self) -> None:
         output_dir = self._current_output_dir()
@@ -1072,26 +1090,6 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def load_model(self, role: str) -> None:
-        bundle = self._require_project()
-        if bundle is None:
-            return
-        title = "Open YOLOv8-seg leaf geometry model" if role == "leaf" else "Open YOLOv8 disease model"
-        current = bundle.first_model(role)
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            title,
-            current.path if current else "",
-            "YOLO weights (*.pt);;All files (*.*)",
-        )
-        if not path:
-            return
-        label = "Leaf model" if role == "leaf" else "Disease model"
-        self.repo.upsert_model(bundle.project.id, role, path, label=Path(path).name)
-        self._reload_current_bundle()
-        self.workspace.append_log(f"Linked {label.lower()}: {path}")
-        self.statusBar().showMessage(f"{label} linked.", 3500)
-
     # ------------------------------------------------------------------
     # AI mapping
     # ------------------------------------------------------------------
@@ -1113,28 +1111,15 @@ class MainWindow(QMainWindow):
             )
             return
 
-        is_geotiff_source = self.workspace.data_source_index() == 1
-        if is_geotiff_source:
-            if self.current_geotiff is None:
-                QMessageBox.warning(
-                    self,
-                    "GeoTIFF required",
-                    "Import the project GeoTIFF into the map before scanning it.",
-                )
-                return
-            source_path = self.current_geotiff.file_path
-            target_name = self.current_geotiff.file_name
-        else:
-            image_folder = bundle.first_asset("image_folder")
-            if image_folder is None or not image_folder.exists:
-                QMessageBox.warning(
-                    self,
-                    "Image folder required",
-                    "Link a valid folder of unstitched drone images before running AI mapping.",
-                )
-                return
-            source_path = Path(image_folder.path)
-            target_name = source_path.name
+        if self.current_geotiff is None:
+            QMessageBox.warning(
+                self,
+                "GeoTIFF required",
+                "Import the project GeoTIFF into the map before scanning it.",
+            )
+            return
+        source_path = self.current_geotiff.file_path
+        target_name = self.current_geotiff.file_name
 
         project_output_dir = self._ensure_project_output_dir(
             bundle.project.id,
@@ -1147,7 +1132,7 @@ class MainWindow(QMainWindow):
             bundle.project.id,
             "last_mapping",
             {
-                "source": "geotiff" if is_geotiff_source else "image_folder",
+                "source": "geotiff",
                 "output_dir": str(output_dir),
             },
         )
@@ -1162,27 +1147,17 @@ class MainWindow(QMainWindow):
         device = self._selected_inference_device()
         device_label = "GPU" if device != "cpu" else "CPU"
 
-        if is_geotiff_source:
-            self._active_mapping_worker = AiGeotiffMappingWorker(
-                source_path,
-                leaf.path,
-                disease.path,
-                output_dir=output_dir,
-                device=device,
-                parent=self,
-            )
-            self._active_mapping_worker.scan_box.connect(self._on_scan_box)
-            self.fit_overlay()
-            self.workspace.append_log(f"GeoTIFF AI analysis will use native raster resolution on {device_label}.")
-        else:
-            self._active_mapping_worker = AiMappingWorker(
-                source_path,
-                leaf.path,
-                disease.path,
-                output_dir=output_dir,
-                device=device,
-                parent=self,
-            )
+        self._active_mapping_worker = AiGeotiffMappingWorker(
+            source_path,
+            leaf.path,
+            disease.path,
+            output_dir=output_dir,
+            device=device,
+            parent=self,
+        )
+        self._active_mapping_worker.scan_box.connect(self._on_scan_box)
+        self.fit_overlay()
+        self.workspace.append_log(f"GeoTIFF AI analysis will use native raster resolution on {device_label}.")
         self._active_mapping_worker.progress.connect(self._on_mapping_progress)
         self._active_mapping_worker.finished.connect(self._on_mapping_finished)
         self._active_mapping_worker.failed.connect(self._on_mapping_failed)
@@ -1272,7 +1247,7 @@ class MainWindow(QMainWindow):
     def _clear_map_view(self) -> None:
         if not self.map_ready:
             return
-        self._run_js("clearOverlay(); clearDetections(); clearPinLocation(); setScanBox(0, 0, 0, 0);")
+        self._run_js("clearOverlay(); clearDetections(); setScanBox(0, 0, 0, 0);")
 
     def _handle_map_ready(self) -> None:
         self.map_ready = True
@@ -1372,43 +1347,6 @@ class MainWindow(QMainWindow):
         text = f"Zoom: {zoom}"
         self.zoom_status.setText(text)
         self.workspace.set_zoom(zoom)
-
-    # ------------------------------------------------------------------
-    # Coordinate QA
-    # ------------------------------------------------------------------
-
-    def open_pin_checker(self) -> None:
-        if self.current_geotiff is None:
-            QMessageBox.warning(
-                self,
-                "GeoTIFF required",
-                "Import a stitched GeoTIFF first so pinned coordinates can be verified on the map.",
-            )
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open unstitched drone image",
-            self.current_bundle.image_folder_path if self.current_bundle else "",
-            "Images (*.jpg *.jpeg *.png *.tif *.tiff);;All files (*.*)",
-        )
-        if not path:
-            return
-        from .pin_checker import PinCheckerDialog
-
-        mrk_asset = self.current_bundle.first_asset("mrk_file") if self.current_bundle else None
-        mrk_path = mrk_asset.path if mrk_asset and mrk_asset.exists else None
-        if mrk_asset is not None and not mrk_asset.exists:
-            self.workspace.append_log(f"Linked MRK file is missing: {mrk_asset.path}")
-        dialog = PinCheckerDialog(path, mrk_path=mrk_path, parent=self)
-        dialog.setStyleSheet(generate_stylesheet(THEMES[self._current_theme_name]))
-        dialog.pin_requested.connect(self._send_pin_to_map)
-        dialog.show()
-
-    def _send_pin_to_map(self, lat: float, lon: float, filename: str) -> None:
-        self._run_js(f"setPinLocation({lat}, {lon}, {json.dumps(filename)});")
-
-    def clear_map_pin(self) -> None:
-        self._run_js("clearPinLocation();")
 
     # ------------------------------------------------------------------
     # Secondary navigation

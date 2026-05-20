@@ -166,7 +166,6 @@
   var coordFrame = null;
   var lastBridgeCoordAt = 0;
   var lastCoordTextAt = 0;
-  var pinMarker = null;
   var scanBoxLayer = null;
   var detectionVisibility = {
     full_leaf: false, cut_leaf: true,
@@ -712,37 +711,6 @@
       '<div><b>Duplicates:</b> ' + (rec.duplicate_count || 1) + '</div>' +
       '</div>'
     );
-  }
-
-  function setPinLocation(lat, lon, filename) {
-    if (!map) return;
-    if (pinMarker) map.removeLayer(pinMarker);
-    pinMarker = L.circleMarker([lat, lon], {
-      color: "#ffffff",
-      fillColor: "#ef4444",
-      fillOpacity: 1,
-      opacity: 1,
-      radius: 8,
-      weight: 3,
-      pane: "detectionPane",
-      interactive: true
-    }).addTo(map);
-    pinMarker.bindPopup(
-      '<div style="font-size:12px;line-height:1.55">' +
-      '<div style="font-weight:700;margin-bottom:4px">Pinned Location</div>' +
-      '<div><b>Image:</b> ' + esc(filename || "") + '</div>' +
-      '<div><b>Lat:</b> ' + Number(lat).toFixed(7) + '</div>' +
-      '<div><b>Lon:</b> ' + Number(lon).toFixed(7) + '</div>' +
-      '</div>'
-    ).openPopup();
-    map.setView([lat, lon], Math.max(map.getZoom(), 18));
-  }
-
-  function clearPinLocation() {
-    if (pinMarker) {
-      map.removeLayer(pinMarker);
-      pinMarker = null;
-    }
   }
 
   function setScanBox(latMin, lonMin, latMax, lonMax) {

@@ -13,7 +13,7 @@ from ..geotiff import GeoTiffInfo, GeoTiffTileLevel
 @dataclass(frozen=True)
 class GeoTiffCacheKey:
     path: Path
-    max_preview_pixels: int
+    display_scale_percent: int
     mtime_ns: int
     size: int
 
@@ -37,8 +37,8 @@ class GeoTiffSessionCache:
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def get(self, path: str | Path, max_preview_pixels: int) -> GeoTiffInfo | None:
-        key = self._key(path, max_preview_pixels)
+    def get(self, path: str | Path, display_scale_percent: int) -> GeoTiffInfo | None:
+        key = self._key(path, display_scale_percent)
         if key is None:
             return None
         info = self._items.get(key)
@@ -50,8 +50,8 @@ class GeoTiffSessionCache:
         self._items.move_to_end(key)
         return info
 
-    def put(self, info: GeoTiffInfo, max_preview_pixels: int) -> None:
-        key = self._key(info.file_path, max_preview_pixels)
+    def put(self, info: GeoTiffInfo, display_scale_percent: int) -> None:
+        key = self._key(info.file_path, display_scale_percent)
         if key is None:
             return
         self._items[key] = info
@@ -102,7 +102,7 @@ class GeoTiffSessionCache:
                 return None
             if (
                 Path(payload["file_path"]).resolve(strict=True) != key.path
-                or int(payload["max_preview_pixels"]) != key.max_preview_pixels
+                or int(payload["display_scale_percent"]) != key.display_scale_percent
                 or int(payload["mtime_ns"]) != key.mtime_ns
                 or int(payload["size"]) != key.size
             ):
@@ -170,7 +170,7 @@ class GeoTiffSessionCache:
                     }
                     for level in info.tile_levels
                 ],
-                "max_preview_pixels": key.max_preview_pixels,
+                "display_scale_percent": key.display_scale_percent,
                 "mtime_ns": key.mtime_ns,
                 "size": key.size,
             }
@@ -180,11 +180,11 @@ class GeoTiffSessionCache:
 
     @staticmethod
     def _cache_stem(key: GeoTiffCacheKey) -> str:
-        raw = f"{key.path}|{key.max_preview_pixels}|{key.mtime_ns}|{key.size}"
+        raw = f"{key.path}|{key.display_scale_percent}|{key.mtime_ns}|{key.size}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _key(path: str | Path, max_preview_pixels: int) -> GeoTiffCacheKey | None:
+    def _key(path: str | Path, display_scale_percent: int) -> GeoTiffCacheKey | None:
         file_path = Path(path).expanduser()
         try:
             resolved = file_path.resolve(strict=True)
@@ -193,7 +193,7 @@ class GeoTiffSessionCache:
             return None
         return GeoTiffCacheKey(
             path=resolved,
-            max_preview_pixels=int(max_preview_pixels),
+            display_scale_percent=int(display_scale_percent),
             mtime_ns=stat.st_mtime_ns,
             size=stat.st_size,
         )

@@ -34,7 +34,7 @@ class NewProjectDialog(QDialog):
         title = QLabel("Create Project")
         title.setObjectName("dialogTitle")
         subtitle = QLabel(
-            "Projects keep GeoTIFFs, image folders, AI models, generated outputs, and analysis metadata isolated."
+            "Projects keep GeoTIFFs, AI models, generated outputs, and analysis metadata isolated."
         )
         subtitle.setObjectName("bodyText")
         subtitle.setWordWrap(True)

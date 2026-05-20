@@ -17,16 +17,8 @@ from PyQt6.QtWidgets import (
 
 ASSET_LABELS = {
     "geotiff": "GeoTIFF",
-    "image_folder": "Image Folder",
-    "mrk_file": "MRK File",
     "output_dir": "Output Folder",
 }
-
-MODEL_LABELS = {
-    "leaf": "Leaf Model",
-    "disease": "Disease Model",
-}
-
 
 def section_label(text: str) -> QLabel:
     label = QLabel(text.upper())

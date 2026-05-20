@@ -256,7 +256,7 @@ class DashboardPage(QWidget):
         if not bundles:
             empty = EmptyState(
                 "No Projects Yet",
-                "Create a project to connect GeoTIFFs, drone image folders, AI models, and exports.",
+                "Create a project to connect GeoTIFFs, AI models, and exports.",
                 "Create Project",
             )
             if empty.button:

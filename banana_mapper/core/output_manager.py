@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 OUTPUT_ROOT_NAME = "SystemOutput"
-PROJECT_SUBDIRS = ("ai_analysis", "coordinate_qa", "logs", "exports", "cache", "cache/geotiff", "reports")
+PROJECT_SUBDIRS = ("ai_analysis", "logs", "exports", "cache", "cache/geotiff", "reports")
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,8 @@ class ProjectOutputManager:
                 continue
             relative = path.relative_to(project_dir)
             if relative.parts and relative.parts[0] == "cache":
+                continue
+            if relative.parts and relative.parts[0] == "coordinate_qa":
                 continue
             stat = path.stat()
             records.append(

@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 from ..core.models import ProjectBundle
 from ..core.output_manager import OutputFile
 from ..geotiff import GeoTiffInfo
-from .widgets import ASSET_LABELS, MODEL_LABELS, AssetRow, MetricCard, card, meta_row, section_label
+from .widgets import ASSET_LABELS, AssetRow, MetricCard, card, meta_row, section_label
 
 
 class OutputFileRow(QFrame):
@@ -80,19 +80,13 @@ class OutputFileRow(QFrame):
 class WorkspacePage(QWidget):
     backRequested = pyqtSignal()
     importGeoTiffRequested = pyqtSignal()
-    imageFolderRequested = pyqtSignal()
-    mrkFileRequested = pyqtSignal()
     projectOutputOpenRequested = pyqtSignal()
     outputsRefreshRequested = pyqtSignal()
     outputOpenRequested = pyqtSignal(str)
     outputRevealRequested = pyqtSignal(str)
     outputExportRequested = pyqtSignal(str)
     outputDeleteRequested = pyqtSignal(str)
-    leafModelRequested = pyqtSignal()
-    diseaseModelRequested = pyqtSignal()
     runMappingRequested = pyqtSignal()
-    pinCheckerRequested = pyqtSignal()
-    clearPinRequested = pyqtSignal()
     fitMapRequested = pyqtSignal()
     resetViewRequested = pyqtSignal()
     zoomInRequested = pyqtSignal()
@@ -101,7 +95,6 @@ class WorkspacePage(QWidget):
     overlayOpacityChanged = pyqtSignal(int)
     detectionOpacityChanged = pyqtSignal(int)
     detectionLayerChanged = pyqtSignal(str, bool)
-    dataSourceChanged = pyqtSignal(int)
     resolutionChanged = pyqtSignal(int)
     projectExplorerVisibilityChanged = pyqtSignal(bool)
     inspectorVisibilityChanged = pyqtSignal(bool)
@@ -121,12 +114,11 @@ class WorkspacePage(QWidget):
         self._right_panel_width = 360
         self._project_explorer_visible = True
         self._inspector_visible = True
-        self._resolution_options: list[tuple[str, int]] = [
-            ("Maximum (65 MP, tiled/GPU optimized)", 65_000_000),
-            ("High (40 MP)", 40_000_000),
-            ("Medium (20 MP)", 20_000_000),
-            ("Low (10 MP)", 10_000_000),
-            ("Minimum (5 MP)", 5_000_000),
+        self._resolution_options: list[tuple[str, int, float]] = [
+            ("Default Resolution - 100% (Original Resolution)", 100, 1.0),
+            ("75% Scaled", 75, 0.75),
+            ("50% Scaled", 50, 0.50),
+            ("25% Scaled", 25, 0.25),
         ]
         self._resolution_index = 0
         self._syncing_resolution = False
@@ -158,12 +150,8 @@ class WorkspacePage(QWidget):
         self.run_btn = QPushButton("Run AI Mapping")
         self.run_btn.setObjectName("primaryButton")
         self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.import_btn = QPushButton("Import GeoTIFF")
-        self.import_btn.setObjectName("secondaryButton")
-        self.import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         topbar_layout.addWidget(self.back_btn)
         topbar_layout.addLayout(title_col, 1)
-        topbar_layout.addWidget(self.import_btn)
         topbar_layout.addWidget(self.run_btn)
         root.addWidget(topbar)
 
@@ -384,34 +372,27 @@ class WorkspacePage(QWidget):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 10, 0, 0)
-        layout.setSpacing(10)
-        actions = QGridLayout()
-        actions.setSpacing(8)
-        for text, signal, row, col in [
-            ("Link GeoTIFF", self.importGeoTiffRequested, 0, 0),
-            ("Image Folder", self.imageFolderRequested, 0, 1),
-            ("MRK File", self.mrkFileRequested, 1, 0),
-            ("Leaf Model", self.leafModelRequested, 1, 1),
-            ("Disease Model", self.diseaseModelRequested, 2, 0),
-        ]:
-            btn = QPushButton(text)
-            btn.setObjectName("secondaryButton")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, sig=signal: sig.emit())
-            actions.addWidget(btn, row, col)
-        layout.addLayout(actions)
+        layout.setSpacing(12)
 
-        resolution = card("GeoTIFF Display Resolution")
+        resolution = card("GeoTIFF Display")
         res_layout = resolution.layout()
+        helper = QLabel("Choose the display scale before importing or refreshing the orthomosaic preview.")
+        helper.setObjectName("bodyText")
+        helper.setWordWrap(True)
+        res_layout.addWidget(helper)
         self.geotiff_resolution_combo = self._make_resolution_combo()
         res_layout.addWidget(self.geotiff_resolution_combo)
-        self.render_resolution_label = QLabel("Rendering: Maximum (65 MP, tiled/GPU optimized)")
+        self.import_geotiff_btn = QPushButton("Import GeoTIFF")
+        self.import_geotiff_btn.setObjectName("primaryButton")
+        self.import_geotiff_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        res_layout.addWidget(self.import_geotiff_btn)
+        self.render_resolution_label = QLabel("Display scale: Default Resolution - 100% (Original Resolution)")
         self.render_resolution_label.setObjectName("metaValue")
         self.render_resolution_label.setWordWrap(True)
         self.processing_resolution_label = QLabel("Processing: Native GeoTIFF resolution")
         self.processing_resolution_label.setObjectName("metaValue")
         self.processing_resolution_label.setWordWrap(True)
-        self.downsample_label = QLabel("Downsampling: Auto, constrained by selected preview budget")
+        self.downsample_label = QLabel("Preview scaling: original display grid")
         self.downsample_label.setObjectName("metaValue")
         self.downsample_label.setWordWrap(True)
         res_layout.addWidget(self.render_resolution_label)
@@ -419,6 +400,7 @@ class WorkspacePage(QWidget):
         res_layout.addWidget(self.downsample_label)
         layout.addWidget(resolution)
 
+        layout.addWidget(section_label("Linked Assets"))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -444,14 +426,9 @@ class WorkspacePage(QWidget):
         refresh_btn.setObjectName("compactButton")
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(lambda _=False: self.outputsRefreshRequested.emit())
-        open_btn = QPushButton("Open Folder")
-        open_btn.setObjectName("compactButton")
-        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_btn.clicked.connect(lambda _=False: self.projectOutputOpenRequested.emit())
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(refresh_btn)
-        header.addWidget(open_btn)
         layout.addLayout(header)
 
         scroll = QScrollArea()
@@ -474,55 +451,28 @@ class WorkspacePage(QWidget):
 
         workflow = card("AI Mapping Workflow")
         w_layout = workflow.layout()
-        self.data_source_combo = QComboBox()
-        self.data_source_combo.addItem("Source: linked image folder")
-        self.data_source_combo.addItem("Source: current GeoTIFF")
-        w_layout.addWidget(self.data_source_combo)
-
+        self.geotiff_source_status = QLabel("Source: no GeoTIFF imported")
+        self.geotiff_source_status.setObjectName("metaValue")
+        self.geotiff_source_status.setWordWrap(True)
         self.ai_processing_status = QLabel("AI resolution: Native GeoTIFF pixels")
         self.ai_processing_status.setObjectName("metaValue")
         self.ai_processing_status.setWordWrap(True)
+        w_layout.addWidget(self.geotiff_source_status)
         w_layout.addWidget(self.ai_processing_status)
 
-        self.folder_status = QLabel("Image folder: --")
-        self.folder_status.setObjectName("metaValue")
-        self.folder_status.setWordWrap(True)
-        self.mrk_status = QLabel("MRK file: --")
-        self.mrk_status.setObjectName("metaValue")
-        self.mrk_status.setWordWrap(True)
         self.output_status = QLabel("Output: system-managed project folder")
         self.output_status.setObjectName("metaValue")
         self.output_status.setWordWrap(True)
-        self.leaf_model_status = QLabel("Leaf model: --")
-        self.leaf_model_status.setObjectName("metaValue")
-        self.leaf_model_status.setWordWrap(True)
-        self.disease_model_status = QLabel("Disease model: --")
-        self.disease_model_status.setObjectName("metaValue")
-        self.disease_model_status.setWordWrap(True)
-        w_layout.addWidget(self.folder_status)
-        w_layout.addWidget(self.mrk_status)
+        self.ai_model_status = QLabel("AI models: managed in AI Models")
+        self.ai_model_status.setObjectName("metaValue")
+        self.ai_model_status.setWordWrap(True)
         w_layout.addWidget(self.output_status)
-        w_layout.addWidget(self.leaf_model_status)
-        w_layout.addWidget(self.disease_model_status)
+        w_layout.addWidget(self.ai_model_status)
         run_btn = QPushButton("Run AI Mapping")
         run_btn.setObjectName("primaryButton")
         run_btn.clicked.connect(lambda _=False: self.runMappingRequested.emit())
         w_layout.addWidget(run_btn)
         layout.addWidget(workflow)
-
-        checker = card("Coordinate QA")
-        c_layout = checker.layout()
-        qa_row = QHBoxLayout()
-        pin_btn = QPushButton("Open Image")
-        pin_btn.setObjectName("secondaryButton")
-        clear_btn = QPushButton("Clear Pin")
-        clear_btn.setObjectName("secondaryButton")
-        pin_btn.clicked.connect(lambda _=False: self.pinCheckerRequested.emit())
-        clear_btn.clicked.connect(lambda _=False: self.clearPinRequested.emit())
-        qa_row.addWidget(pin_btn)
-        qa_row.addWidget(clear_btn)
-        c_layout.addLayout(qa_row)
-        layout.addWidget(checker)
         layout.addStretch(1)
         return tab
 
@@ -567,12 +517,11 @@ class WorkspacePage(QWidget):
 
     def _connect_ui(self) -> None:
         self.back_btn.clicked.connect(lambda _=False: self.backRequested.emit())
-        self.import_btn.clicked.connect(lambda _=False: self.importGeoTiffRequested.emit())
+        self.import_geotiff_btn.clicked.connect(lambda _=False: self.importGeoTiffRequested.emit())
         self.run_btn.clicked.connect(lambda _=False: self.runMappingRequested.emit())
         self.visibility_toggle.toggled.connect(self.overlayVisibilityChanged.emit)
         self.opacity_slider.valueChanged.connect(self._overlay_opacity_changed)
         self.ai_opacity_slider.valueChanged.connect(self._detection_opacity_changed)
-        self.data_source_combo.currentIndexChanged.connect(self.dataSourceChanged.emit)
         self.geotiff_resolution_combo.currentIndexChanged.connect(self._on_resolution_combo_changed)
         for key, checkbox in self.layer_toggles.items():
             checkbox.toggled.connect(
@@ -605,14 +554,18 @@ class WorkspacePage(QWidget):
         self.export_location_label.setText(export_location)
         self.export_name_label.setToolTip(output_text)
         self.export_location_label.setToolTip(output_text)
-        self.folder_status.setText(f"Image folder: {self._asset_name(bundle.image_folder_path)}")
-        mrk_asset = bundle.first_asset("mrk_file")
-        self.mrk_status.setText(f"MRK file: {mrk_asset.display_name if mrk_asset else '--'}")
+        geotiff = bundle.first_asset("geotiff")
+        self.geotiff_source_status.setText(
+            f"Source: {geotiff.display_name if geotiff and geotiff.exists else 'no GeoTIFF imported'}"
+        )
         self.output_status.setText(f"Output: system-managed at {output_text}")
         leaf = bundle.first_model("leaf")
         disease = bundle.first_model("disease")
-        self.leaf_model_status.setText(f"Leaf model: {leaf.display_name if leaf else '--'}")
-        self.disease_model_status.setText(f"Disease model: {disease.display_name if disease else '--'}")
+        self.ai_model_status.setText(
+            "AI models: configured"
+            if leaf is not None and disease is not None and leaf.exists and disease.exists
+            else "AI models: configure in AI Models"
+        )
         self.render_assets(bundle)
 
     def set_outputs(self, outputs: list[OutputFile]) -> None:
@@ -650,11 +603,10 @@ class WorkspacePage(QWidget):
 
         rows = []
         for asset in bundle.assets:
+            if asset.asset_type in {"image_folder", "mrk_file"}:
+                continue
             title = ASSET_LABELS.get(asset.asset_type, asset.asset_type.replace("_", " ").title())
             rows.append(AssetRow(title, asset.path, asset.exists, asset.modified_at.replace("T", " ")[:16]))
-        for model in bundle.models:
-            title = MODEL_LABELS.get(model.role, model.role.title())
-            rows.append(AssetRow(title, model.path, model.exists, model.modified_at.replace("T", " ")[:16]))
         for result in bundle.results[:4]:
             rows.append(AssetRow("Analysis Result", result.json_path, result.exists, result.created_at.replace("T", " ")[:16]))
 
@@ -717,13 +669,18 @@ class WorkspacePage(QWidget):
     def append_log(self, message: str) -> None:
         self.log_output.append(message)
 
-    def selected_resolution_pixels(self) -> int:
+    def selected_resolution_scale(self) -> float:
+        if 0 <= self._resolution_index < len(self._resolution_options):
+            return self._resolution_options[self._resolution_index][2]
+        return 1.0
+
+    def selected_resolution_percent(self) -> int:
         if 0 <= self._resolution_index < len(self._resolution_options):
             return self._resolution_options[self._resolution_index][1]
-        return 65_000_000
+        return 100
 
-    def data_source_index(self) -> int:
-        return self.data_source_combo.currentIndex()
+    def set_resolution_index(self, index: int) -> None:
+        self._set_resolution_index(index)
 
     def _overlay_opacity_changed(self, value: int) -> None:
         self.opacity_value.setText(f"{value}%")
@@ -735,7 +692,7 @@ class WorkspacePage(QWidget):
 
     def _make_resolution_combo(self) -> QComboBox:
         combo = QComboBox()
-        for label, _ in self._resolution_options:
+        for label, _, _ in self._resolution_options:
             combo.addItem(label)
         combo.setCurrentIndex(self._resolution_index)
         return combo
@@ -759,10 +716,13 @@ class WorkspacePage(QWidget):
         self._update_resolution_labels()
 
     def _update_resolution_labels(self) -> None:
-        label, pixels = self._resolution_options[self._resolution_index]
-        megapixels = pixels / 1_000_000
-        render_text = f"Rendering: {label}"
-        downsample_text = f"Downsampling: Auto cap at {megapixels:.0f} MP for responsive display"
+        label, percent, _ = self._resolution_options[self._resolution_index]
+        render_text = f"Display scale: {label}"
+        downsample_text = (
+            "Preview scaling: original display grid"
+            if percent == 100
+            else f"Preview scaling: {percent}% of the original display grid"
+        )
         if hasattr(self, "render_resolution_label"):
             self.render_resolution_label.setText(render_text)
         if hasattr(self, "downsample_label"):

@@ -88,11 +88,6 @@ class ProjectBundle:
         return asset.path if asset else ""
 
     @property
-    def image_folder_path(self) -> str:
-        asset = self.first_asset("image_folder")
-        return asset.path if asset else ""
-
-    @property
     def output_dir(self) -> str:
         return self.project.output_dir
 
@@ -110,4 +105,3 @@ class ProjectBundle:
         latest = self.results[0]
         counts = latest.summary.get("counts", {})
         return int(counts.get("total", 0) or 0)
-

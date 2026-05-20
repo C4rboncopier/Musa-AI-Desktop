@@ -17,7 +17,7 @@ from rasterio.warp import calculate_default_transform, reproject, transform_boun
 
 
 WGS84 = "EPSG:4326"
-DEFAULT_MAX_PREVIEW_PIXELS = 65_000_000
+DEFAULT_PREVIEW_SCALE = 1.0
 DEFAULT_TILE_SIZE = 512
 
 
@@ -121,7 +121,7 @@ def _report(cb: _ProgressCb, percent: int, message: str) -> None:
 
 def load_geotiff_for_leaflet(
     path: str | Path,
-    max_preview_pixels: int = DEFAULT_MAX_PREVIEW_PIXELS,
+    preview_scale: float = DEFAULT_PREVIEW_SCALE,
     progress_callback: _ProgressCb = None,
 ) -> GeoTiffInfo:
     """Read a GeoTIFF and export a map-ready EPSG:4326 PNG preview.
@@ -133,7 +133,8 @@ def load_geotiff_for_leaflet(
 
     Args:
         path: Path to the GeoTIFF file.
-        max_preview_pixels: Maximum pixels for the preview image.
+        preview_scale: Display scale from 0.25 to 1.0. A value of 1.0 keeps
+            the calculated/native display grid without downscaling.
         progress_callback: Optional callable(percent: int, message: str) invoked
             at each processing stage. Safe to call from a background thread.
     """
@@ -163,7 +164,7 @@ def load_geotiff_for_leaflet(
             bounds_wgs84 = _bounds_to_wgs84(dataset.crs, bounds_source)
 
             _report(cb, 45, "Computing optimal display grid...")
-            dst_transform, dst_width, dst_height = _display_grid(dataset, max_preview_pixels)
+            dst_transform, dst_width, dst_height = _display_grid(dataset, preview_scale)
 
             _report(cb, 50, f"Reprojecting raster to RGBA ({dst_width:,} x {dst_height:,} px)...")
             rgba = _reproject_to_rgba(dataset, dst_transform, dst_width, dst_height)
@@ -245,7 +246,7 @@ def _bounds_to_wgs84(crs: rasterio.crs.CRS, bounds: tuple[float, float, float, f
     return _normalize_bounds(west, south, east, north)
 
 
-def _display_grid(dataset: rasterio.DatasetReader, max_preview_pixels: int) -> tuple[rasterio.Affine, int, int]:
+def _display_grid(dataset: rasterio.DatasetReader, preview_scale: float) -> tuple[rasterio.Affine, int, int]:
     transform, width, height = calculate_default_transform(
         dataset.crs,
         WGS84,
@@ -257,13 +258,12 @@ def _display_grid(dataset: rasterio.DatasetReader, max_preview_pixels: int) -> t
     if width <= 0 or height <= 0:
         raise GeoTiffError("Unable to calculate a valid WGS84 display grid.")
 
-    pixel_count = width * height
-    if pixel_count <= max_preview_pixels:
+    scale = max(0.01, min(1.0, float(preview_scale or 1.0)))
+    if scale >= 0.999:
         return transform, width, height
 
-    scale = (max_preview_pixels / pixel_count) ** 0.5
-    scaled_width = max(1, int(width * scale))
-    scaled_height = max(1, int(height * scale))
+    scaled_width = max(1, int(round(width * scale)))
+    scaled_height = max(1, int(round(height * scale)))
     scaled_transform = transform * Affine.scale(width / scaled_width, height / scaled_height)
     return scaled_transform, scaled_width, scaled_height
 
