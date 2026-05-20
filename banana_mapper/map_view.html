@@ -161,15 +161,12 @@
         attribution: "&copy; OpenStreetMap contributors"
       }
     },
-    satellite: {
-      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      options: {
-        maxZoom: 23,
-        maxNativeZoom: 19,
-        attribution: "Tiles &copy; Esri"
-      }
+    google_satellite: {
+      googleMapType: "satellite",
+      attribution: "Imagery &copy; Google"
     }
   };
+  var googleMapsApiKey = "";
   var imageOverlay = null, extentRectangle = null, labelTooltip = null;
   var currentBounds = null, pendingOverlay = null, pendingDetections = null;
   var overlayVisible = true, overlayOpacity = 0.78;
@@ -262,6 +259,9 @@
 
   function createBaseTileLayer(name) {
     var spec = BASE_MAPS[name] || BASE_MAPS.osm;
+    if (spec.googleMapType) {
+      return createGoogleTileLayer(spec.googleMapType, spec.attribution);
+    }
     var options = Object.assign({
       keepBuffer: 6,
       updateWhenIdle: false,
@@ -282,7 +282,78 @@
     return layer;
   }
 
-  function setBaseMap(name) {
+  function createGoogleTileLayer(mapType, attribution) {
+    var layer = L.tileLayer("", {
+      maxZoom: 22,
+      maxNativeZoom: 22,
+      tileSize: 256,
+      keepBuffer: 6,
+      updateWhenIdle: false,
+      updateWhenZooming: true,
+      updateInterval: 120,
+      crossOrigin: true,
+      attribution: attribution
+    });
+    layer._googleMapType = mapType;
+    layer._googleSession = null;
+    layer._googleSessionLoading = false;
+    layer._googleSessionFailed = false;
+    layer.getTileUrl = function(coords) {
+      if (!googleMapsApiKey) return transparentTile();
+      if (!this._googleSession) {
+        this._ensureGoogleSession();
+        return transparentTile();
+      }
+      return (
+        "https://tile.googleapis.com/v1/2dtiles/" +
+        coords.z + "/" + coords.x + "/" + coords.y +
+        "?session=" + encodeURIComponent(this._googleSession) +
+        "&key=" + encodeURIComponent(googleMapsApiKey)
+      );
+    };
+    layer._ensureGoogleSession = function() {
+      if (this._googleSession || this._googleSessionLoading || this._googleSessionFailed) return;
+      this._googleSessionLoading = true;
+      fetch("https://tile.googleapis.com/v1/createSession?key=" + encodeURIComponent(googleMapsApiKey), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mapType: this._googleMapType,
+          language: "en-US",
+          region: "PH"
+        })
+      })
+      .then(function(response) {
+        if (!response.ok) throw new Error("Google Maps session failed: " + response.status);
+        return response.json();
+      })
+      .then(function(data) {
+        this._googleSession = data.session || "";
+        this._googleSessionLoading = false;
+        if (this._googleSession) {
+          this.redraw();
+          scheduleMapRefresh(1800);
+        } else {
+          this._googleSessionFailed = true;
+        }
+      }.bind(this))
+      .catch(function(error) {
+        this._googleSessionLoading = false;
+        this._googleSessionFailed = true;
+        console.warn(error);
+      }.bind(this));
+    };
+    layer.on("add", function() { layer._ensureGoogleSession(); });
+    return layer;
+  }
+
+  function transparentTile() {
+    return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+  }
+
+  function setBaseMap(payload) {
+    var name = typeof payload === "string" ? payload : payload.name;
+    googleMapsApiKey = (typeof payload === "object" && payload.googleApiKey) ? payload.googleApiKey : googleMapsApiKey;
     if (!map || !BASE_MAPS[name] || name === activeBaseMap) return;
     activeBaseMap = name;
     if (baseTileLayer) map.removeLayer(baseTileLayer);

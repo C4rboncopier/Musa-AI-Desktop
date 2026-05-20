@@ -13,6 +13,9 @@ env/
 ENV/
 .env
 .env.*
+*.env.local
+google_maps_api_key.txt
+*google*api*key*
 
 # Local application data
 .banana_mapper/

@@ -57,6 +57,9 @@ from .ui.workspace import WorkspacePage
 from .worker import AiGeotiffMappingWorker, GeoTiffWorker, HardwareCheckWorker
 
 
+BASE_MAPS = {"osm", "google_satellite"}
+
+
 class MainWindow(QMainWindow):
     """Application shell for the project-based geospatial AI workflow."""
 
@@ -93,7 +96,10 @@ class MainWindow(QMainWindow):
         if self._current_theme_name not in THEMES:
             self._current_theme_name = DEFAULT_THEME
         self._current_base_map = str(self.repo.get_preference("base_map", "osm") or "osm")
-        if self._current_base_map not in {"osm", "satellite"}:
+        if self._current_base_map not in BASE_MAPS:
+            self._current_base_map = "osm"
+        self._google_maps_api_key = _load_google_maps_api_key()
+        if self._current_base_map.startswith("google_") and not self._google_maps_api_key:
             self._current_base_map = "osm"
 
         self.bridge = MapBridge()
@@ -1376,12 +1382,28 @@ class MainWindow(QMainWindow):
         self._run_js(f"setDetectionOpacity({value / 100:.2f});")
 
     def _set_base_map(self, base_map: str) -> None:
-        if base_map not in {"osm", "satellite"}:
+        if base_map not in BASE_MAPS:
+            return
+        if base_map.startswith("google_") and not self._google_maps_api_key:
+            self.workspace.set_base_map(self._current_base_map)
+            self.statusBar().showMessage("Add GOOGLE_MAPS_API_KEY to .env to enable Google basemaps.", 6000)
+            QMessageBox.information(
+                self,
+                "Google Maps API key required",
+                "Google basemaps need a Google Maps Platform API key.\n\n"
+                "Create a local .env file in the project folder and add:\n"
+                "GOOGLE_MAPS_API_KEY=your_key_here\n\n"
+                "The .env file is ignored by git.",
+            )
             return
         self._current_base_map = base_map
         self.repo.set_preference("base_map", base_map)
         self._push_base_map_to_map()
-        label = "Satellite" if base_map == "satellite" else "OpenStreetMap"
+        labels = {
+            "osm": "OpenStreetMap",
+            "google_satellite": "Google Satellite",
+        }
+        label = labels.get(base_map, base_map)
         self.statusBar().showMessage(f"Basemap set to {label}.", 2500)
 
     def _push_base_map_to_map(self) -> None:
@@ -1389,7 +1411,11 @@ class MainWindow(QMainWindow):
             self.workspace.set_base_map(self._current_base_map)
         if not self.map_ready:
             return
-        self._run_js(f"setBaseMap({json.dumps(self._current_base_map)});")
+        payload = {
+            "name": self._current_base_map,
+            "googleApiKey": self._google_maps_api_key if self._current_base_map.startswith("google_") else "",
+        }
+        self._run_js(f"setBaseMap({json.dumps(payload)});")
 
     def _run_js(self, script: str) -> None:
         self.workspace.map_view.page().runJavaScript(script)
@@ -1506,6 +1532,27 @@ def _record_from_payload(payload: dict) -> DetectionRecord:
     if clean.get("layer_keys") is None:
         clean["layer_keys"] = []
     return DetectionRecord(**clean)
+
+
+def _load_google_maps_api_key() -> str:
+    for name in ("GOOGLE_MAPS_API_KEY", "MUSA_GOOGLE_MAPS_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    env_path = Path.cwd() / ".env"
+    if not env_path.exists():
+        return ""
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            if key.strip() in {"GOOGLE_MAPS_API_KEY", "MUSA_GOOGLE_MAPS_API_KEY"}:
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
 
 
 def run() -> None:
