@@ -83,6 +83,12 @@ class ProjectOutputManager:
                 continue
             if relative.parts and relative.parts[0] == "coordinate_qa":
                 continue
+            if (
+                len(relative.parts) >= 2
+                and relative.parts[0] == "qa_diagnostics"
+                and relative.parts[1] == "disease_crops"
+            ):
+                continue
             stat = path.stat()
             records.append(
                 OutputFile(

@@ -83,6 +83,7 @@ class AiGeotiffMappingWorker(QThread):
         disease_model_path: str | Path,
         output_dir: str | Path | None = None,
         device: str | int | None = None,
+        mapping_options: dict[str, object] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -91,6 +92,7 @@ class AiGeotiffMappingWorker(QThread):
         self._disease_model_path = disease_model_path
         self._output_dir = output_dir
         self._device = device
+        self._mapping_options = mapping_options or {}
 
     def run(self) -> None:
         try:
@@ -100,6 +102,7 @@ class AiGeotiffMappingWorker(QThread):
                 self._disease_model_path,
                 output_dir=self._output_dir,
                 device=self._device,
+                **self._mapping_options,
                 progress_callback=self._on_progress,
                 should_stop=self.isInterruptionRequested,
                 scan_callback=self._on_scan,

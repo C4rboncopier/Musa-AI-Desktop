@@ -937,6 +937,7 @@ class MainWindow(QMainWindow):
                 processed_images=int(latest.summary.get("processed_images", 0) or 0),
                 skipped_images=int(latest.summary.get("skipped_images", 0) or 0),
                 warnings=list(warnings),
+                qa_json_path=str(latest.summary.get("qa_json_path", "")),
             )
             self.workspace.update_counts(counts)
             self._send_detections_to_map(self.latest_mapping_result)
@@ -1279,6 +1280,7 @@ class MainWindow(QMainWindow):
         dialog = self._mapping_dialog
         device = self._selected_inference_device()
         device_label = "GPU" if device != "cpu" else "CPU"
+        mapping_options = self.workspace.mapping_options()
 
         self._active_mapping_worker = AiGeotiffMappingWorker(
             source_path,
@@ -1286,11 +1288,19 @@ class MainWindow(QMainWindow):
             disease.path,
             output_dir=output_dir,
             device=device,
+            mapping_options=mapping_options,
             parent=self,
         )
         self._active_mapping_worker.scan_box.connect(self._on_scan_box)
         self.fit_overlay()
         self.workspace.append_log(f"GeoTIFF AI analysis will use native raster resolution on {device_label}.")
+        self.workspace.append_log(
+            "AI thresholds: "
+            f"leaf {int(float(mapping_options['leaf_confidence']) * 100)}%, "
+            f"disease {int(float(mapping_options['disease_confidence']) * 100)}%."
+        )
+        if mapping_options.get("qa_enabled"):
+            self.workspace.append_log("QA diagnostics enabled for this mapping run.")
         self._active_mapping_worker.progress.connect(self._on_mapping_progress)
         self._active_mapping_worker.finished.connect(self._on_mapping_finished)
         self._active_mapping_worker.failed.connect(self._on_mapping_failed)
@@ -1341,6 +1351,7 @@ class MainWindow(QMainWindow):
                     "skipped_images": result.skipped_images,
                     "warning_count": len(result.warnings),
                     "xlsx_path": result.xlsx_path,
+                    "qa_json_path": result.qa_json_path,
                 },
             )
             self._reload_current_bundle()
@@ -1350,6 +1361,8 @@ class MainWindow(QMainWindow):
             f"AI mapping complete: {result.processed_images} processed{skipped}. "
             f"JSON: {result.json_path} | Excel: {result.xlsx_path}"
         )
+        if result.qa_json_path:
+            self.workspace.append_log(f"QA diagnostics: {result.qa_json_path}")
         self.statusBar().showMessage("AI mapping complete and saved to project.", 7000)
         if result.warnings:
             QMessageBox.information(

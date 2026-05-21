@@ -52,6 +52,8 @@ class MappingResult:
     processed_images: int
     skipped_images: int
     warnings: list[str]
+    qa_json_path: str = ""
+    qa_crop_dir: str = ""
 
     def to_map_payload(self) -> dict:
         return {
@@ -85,6 +87,15 @@ class _DiseasePrediction:
     center: tuple[float, float]
 
 
+@dataclass(frozen=True)
+class MappingQaOptions:
+    enabled: bool = False
+    save_crops: bool = False
+    crop_limit: int = 300
+    event_limit: int = 5000
+    crop_padding: int = 32
+
+
 _ProgressCb = Optional[Callable[[int, str], None]]
 
 
@@ -95,9 +106,16 @@ def run_funnel_mapping_geotiff(
     *,
     output_dir: str | Path | None = None,
     confidence: float = 0.5,
+    leaf_confidence: float | None = None,
+    disease_confidence: float | None = None,
     slice_size: int = 512,
     slice_overlap: int = 96,
     duplicate_distance_m: float = 0.5,
+    normalize_tiles: bool = False,
+    match_disease_inside_cut_leaves: bool = False,
+    include_unmatched_disease: bool = False,
+    qa_enabled: bool = False,
+    qa_save_crops: bool = False,
     device: str | int | None = None,
     progress_callback: _ProgressCb = None,
     should_stop: Optional[Callable[[], bool]] = None,
@@ -131,8 +149,40 @@ def run_funnel_mapping_geotiff(
     if not disease_model_path.exists():
         raise RuntimeError("The selected disease model does not exist.")
 
+    leaf_confidence = confidence if leaf_confidence is None else max(0.01, min(0.99, float(leaf_confidence)))
+    disease_confidence = confidence if disease_confidence is None else max(0.01, min(0.99, float(disease_confidence)))
+    qa_options = MappingQaOptions(enabled=qa_enabled, save_crops=qa_save_crops)
+
     out_dir = Path(output_dir) if output_dir else geotiff_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    qa_dir = out_dir / "qa_diagnostics"
+    qa_crop_dir = qa_dir / "disease_crops"
+    qa_json_path = ""
+    qa_events: list[dict] = []
+    qa_tile_summaries: list[dict] = []
+    qa_crops_saved = 0
+    qa_events_truncated = False
+    qa_summary = {
+        "tiles_prepared": 0,
+        "tiles_processed": 0,
+        "empty_tiles_skipped": 0,
+        "inference_failed_tiles": 0,
+        "raw_leaf_predictions": 0,
+        "raw_disease_predictions": 0,
+        "accepted_disease_predictions": 0,
+        "rejected_disease_predictions": 0,
+        "included_unmatched_disease_predictions": 0,
+        "coordinate_projection_failures": 0,
+        "matched_cut_leaf_disease_predictions": 0,
+        "records_before_dedupe": 0,
+        "records_after_dedupe": 0,
+        "duplicates_merged": 0,
+        "qa_crops_saved": 0,
+    }
+    if qa_options.enabled:
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        if qa_options.save_crops:
+            qa_crop_dir.mkdir(parents=True, exist_ok=True)
 
     _report(progress_callback, 2, "Loading YOLO models...")
     leaf_model = YOLO(str(leaf_model_path))
@@ -146,6 +196,7 @@ def run_funnel_mapping_geotiff(
         height = dataset.height
 
         tiles = _generate_tiles(width, height, slice_size, slice_overlap)
+        qa_summary["tiles_prepared"] = len(tiles)
         _report(progress_callback, 5, f"Prepared {len(tiles)} tiles for scanning...")
 
         for index, (x0, y0, x1, y1) in enumerate(tiles, start=1):
@@ -177,21 +228,11 @@ def run_funnel_mapping_geotiff(
                 warnings.append(f"Failed to read tile {index}: {exc}")
                 continue
 
-            if tile_data.shape[0] == 1:
-                tile_data = np.repeat(tile_data, 3, axis=0)
-            elif tile_data.shape[0] == 2:
-                tile_data = np.vstack([tile_data[0:1], tile_data[0:1], tile_data[0:1]])
-
-            tile_img = np.transpose(tile_data, (1, 2, 0))
-
-            if tile_img.dtype != np.uint8:
-                if tile_img.max() > 255:
-                    tile_img = (tile_img / 256).astype(np.uint8)
-                else:
-                    tile_img = tile_img.astype(np.uint8)
+            tile_img = _tile_data_to_rgb(tile_data, normalize=normalize_tiles)
 
             # Skip empty tiles (all black or all white/transparent)
             if np.all(tile_img == 0) or np.all(tile_img == 255):
+                qa_summary["empty_tiles_skipped"] += 1
                 continue
 
             # Run inference
@@ -199,7 +240,7 @@ def run_funnel_mapping_geotiff(
                 leaf_result = leaf_model.predict(
                     source=tile_img,
                     imgsz=slice_size,
-                    conf=confidence,
+                    conf=leaf_confidence,
                     verbose=False,
                     device=device,
                 )[0]
@@ -208,14 +249,28 @@ def run_funnel_mapping_geotiff(
                 disease_result = disease_model.predict(
                     source=tile_img,
                     imgsz=slice_size,
-                    conf=confidence,
+                    conf=disease_confidence,
                     verbose=False,
                     device=device,
                 )[0]
                 diseases = _parse_disease_predictions(disease_result)
             except Exception as exc:
+                qa_summary["inference_failed_tiles"] += 1
                 warnings.append(f"Inference failed on tile {index}: {exc}")
                 continue
+
+            qa_summary["tiles_processed"] += 1
+            qa_summary["raw_leaf_predictions"] += len(leaves)
+            qa_summary["raw_disease_predictions"] += len(diseases)
+            tile_summary = {
+                "tile_index": index,
+                "pixel_bounds": [int(x0), int(y0), int(x1), int(y1)],
+                "leaf_predictions": len(leaves),
+                "disease_predictions": len(diseases),
+                "accepted_diseases": 0,
+                "rejected_diseases": 0,
+                "included_unmatched_diseases": 0,
+            }
 
             # Offset coordinates to full GeoTIFF extent
             for leaf in leaves:
@@ -229,25 +284,135 @@ def run_funnel_mapping_geotiff(
 
             # Funnel mapping and projection to WGS84
             full_leaves = [leaf for leaf in leaves if leaf.class_name == "full_leaf"]
+            match_leaf_classes = {"full_leaf"}
+            if match_disease_inside_cut_leaves:
+                match_leaf_classes.add("cut_leaf")
+            match_leaves = [leaf for leaf in leaves if leaf.class_name in match_leaf_classes]
             
             for i, leaf in enumerate(leaves, start=1):
                 leaf.id = f"geotiff-tile{index}-leaf-{i}"
             
             for i, disease in enumerate(diseases, start=1):
-                containing_leaf = next(
-                    (lf for lf in full_leaves if _point_in_polygon((disease.center[0] - x0, disease.center[1] - y0), [(p[0]-x0, p[1]-y0) for p in lf.polygon])),
-                    None,
-                )
-                if containing_leaf is None:
-                    continue
-
-                containing_leaf.health = "diseased"
+                containing_leaf = _containing_leaf_for_disease(disease, match_leaves, x0, y0)
                 px, py = disease.center
                 try:
                     lat, lon = _raster_pixel_to_wgs84(dataset, px, py)
                 except Exception:
+                    qa_summary["coordinate_projection_failures"] += 1
+                    qa_summary["rejected_disease_predictions"] += 1
+                    tile_summary["rejected_diseases"] += 1
+                    crop_path = ""
+                    if qa_options.enabled and qa_options.save_crops and qa_crops_saved < qa_options.crop_limit:
+                        crop_path = _save_qa_disease_crop(
+                            tile_img, disease, qa_crop_dir, out_dir, index, len(qa_events) + 1, x0, y0, qa_options.crop_padding
+                        )
+                        if crop_path:
+                            qa_crops_saved += 1
+                    _append_qa_disease_event(
+                        qa_events,
+                        qa_options,
+                        disease,
+                        index,
+                        (x0, y0, x1, y1),
+                        "rejected",
+                        "coordinate_projection_failed",
+                        containing_leaf,
+                        match_leaves,
+                        None,
+                        crop_path,
+                    )
                     continue
 
+                if containing_leaf is None:
+                    if include_unmatched_disease:
+                        qa_summary["included_unmatched_disease_predictions"] += 1
+                        tile_summary["included_unmatched_diseases"] += 1
+                        all_records.append(
+                            DetectionRecord(
+                                id=f"geotiff-tile{index}-disease-{i}-unmatched",
+                                image_name=geotiff_path.name,
+                                class_name=disease.class_name,
+                                latitude=lat,
+                                longitude=lon,
+                                confidence=disease.confidence,
+                                pixel_x=px,
+                                pixel_y=py,
+                                health="unmatched",
+                                source="ai_unmatched",
+                                layer_keys=[disease.class_name],
+                            )
+                        )
+                        crop_path = ""
+                        if qa_options.enabled and qa_options.save_crops and qa_crops_saved < qa_options.crop_limit:
+                            crop_path = _save_qa_disease_crop(
+                                tile_img, disease, qa_crop_dir, out_dir, index, len(qa_events) + 1, x0, y0, qa_options.crop_padding
+                            )
+                            if crop_path:
+                                qa_crops_saved += 1
+                        _append_qa_disease_event(
+                            qa_events,
+                            qa_options,
+                            disease,
+                            index,
+                            (x0, y0, x1, y1),
+                            "included_unmatched",
+                            "outside_leaf_filter",
+                            None,
+                            match_leaves,
+                            (lat, lon),
+                            crop_path,
+                        )
+                    else:
+                        qa_summary["rejected_disease_predictions"] += 1
+                        tile_summary["rejected_diseases"] += 1
+                        crop_path = ""
+                        if qa_options.enabled and qa_options.save_crops and qa_crops_saved < qa_options.crop_limit:
+                            crop_path = _save_qa_disease_crop(
+                                tile_img, disease, qa_crop_dir, out_dir, index, len(qa_events) + 1, x0, y0, qa_options.crop_padding
+                            )
+                            if crop_path:
+                                qa_crops_saved += 1
+                        _append_qa_disease_event(
+                            qa_events,
+                            qa_options,
+                            disease,
+                            index,
+                            (x0, y0, x1, y1),
+                            "rejected",
+                            "outside_leaf_filter",
+                            None,
+                            match_leaves,
+                            (lat, lon),
+                            crop_path,
+                        )
+                    continue
+
+                qa_summary["accepted_disease_predictions"] += 1
+                tile_summary["accepted_diseases"] += 1
+                if containing_leaf.class_name == "cut_leaf":
+                    qa_summary["matched_cut_leaf_disease_predictions"] += 1
+                if containing_leaf.class_name == "full_leaf":
+                    containing_leaf.health = "diseased"
+                crop_path = ""
+                if qa_options.enabled and qa_options.save_crops and qa_crops_saved < qa_options.crop_limit:
+                    crop_path = _save_qa_disease_crop(
+                        tile_img, disease, qa_crop_dir, out_dir, index, len(qa_events) + 1, x0, y0, qa_options.crop_padding
+                    )
+                    if crop_path:
+                        qa_crops_saved += 1
+                _append_qa_disease_event(
+                    qa_events,
+                    qa_options,
+                    disease,
+                    index,
+                    (x0, y0, x1, y1),
+                    "accepted",
+                    "",
+                    containing_leaf,
+                    match_leaves,
+                    (lat, lon),
+                    crop_path,
+                )
                 all_records.append(
                     DetectionRecord(
                         id=f"geotiff-tile{index}-disease-{i}",
@@ -264,6 +429,9 @@ def run_funnel_mapping_geotiff(
                     )
                 )
                 
+            if qa_options.enabled:
+                qa_tile_summaries.append(tile_summary)
+
             for leaf in leaves:
                 if leaf.class_name == "full_leaf" and leaf.health is None:
                     leaf.health = "healthy"
@@ -296,11 +464,42 @@ def run_funnel_mapping_geotiff(
         scan_callback(0.0, 0.0, 0.0, 0.0)  # Clear scan box at the end
 
     _report(progress_callback, 92, "Removing duplicate coordinates...")
+    qa_summary["records_before_dedupe"] = len(all_records)
     deduped_records = dedupe_records(all_records, duplicate_distance_m)
+    qa_summary["records_after_dedupe"] = len(deduped_records)
+    qa_summary["duplicates_merged"] = max(0, len(all_records) - len(deduped_records))
+    qa_summary["qa_crops_saved"] = qa_crops_saved
 
     _report(progress_callback, 96, "Saving coordinate outputs...")
     counts = _count_records(deduped_records)
     json_path, csv_path, xlsx_path = save_mapping_outputs(out_dir, deduped_records, counts, warnings)
+    if qa_options.enabled:
+        qa_events_truncated = qa_summary["raw_disease_predictions"] > len(qa_events)
+        qa_json_path = str(
+            save_qa_diagnostics(
+                qa_dir,
+                geotiff_path,
+                {
+                    "leaf_model": str(leaf_model_path),
+                    "disease_model": str(disease_model_path),
+                    "leaf_confidence": leaf_confidence,
+                    "disease_confidence": disease_confidence,
+                    "slice_size": slice_size,
+                    "slice_overlap": slice_overlap,
+                    "duplicate_distance_m": duplicate_distance_m,
+                    "normalize_tiles": normalize_tiles,
+                    "match_disease_inside_cut_leaves": match_disease_inside_cut_leaves,
+                    "include_unmatched_disease": include_unmatched_disease,
+                    "qa_save_crops": qa_options.save_crops,
+                    "device": str(device if device is not None else ""),
+                },
+                qa_summary,
+                qa_tile_summaries,
+                qa_events,
+                warnings,
+                qa_events_truncated,
+            )
+        )
 
     _report(progress_callback, 100, "Done.")
     return MappingResult(
@@ -312,6 +511,8 @@ def run_funnel_mapping_geotiff(
         processed_images=1,
         skipped_images=0,
         warnings=warnings,
+        qa_json_path=qa_json_path,
+        qa_crop_dir=str(qa_crop_dir) if qa_options.enabled and qa_options.save_crops else "",
     )
 
 
@@ -328,6 +529,171 @@ def _raster_pixel_to_wgs84(dataset, pixel_x: float, pixel_y: float) -> tuple[flo
     x_crs, y_crs = dataset.transform * (float(pixel_x), float(pixel_y))
     lon_arr, lat_arr = transform(dataset.crs, "EPSG:4326", [x_crs], [y_crs])
     return float(lat_arr[0]), float(lon_arr[0])
+
+
+def _tile_data_to_rgb(tile_data: np.ndarray, *, normalize: bool = False) -> np.ndarray:
+    """Convert raster bands to an RGB uint8 tile for YOLO inference."""
+
+    if tile_data.shape[0] == 1:
+        tile_data = np.repeat(tile_data, 3, axis=0)
+    elif tile_data.shape[0] == 2:
+        tile_data = np.vstack([tile_data[0:1], tile_data[0:1], tile_data[0:1]])
+    elif tile_data.shape[0] > 3:
+        tile_data = tile_data[:3]
+
+    tile_img = np.transpose(tile_data, (1, 2, 0))
+    if tile_img.dtype == np.uint8 and not normalize:
+        return np.ascontiguousarray(tile_img)
+
+    tile_float = tile_img.astype(np.float32, copy=False)
+    if normalize:
+        return _normalize_tile_rgb(tile_float)
+
+    finite = tile_float[np.isfinite(tile_float)]
+    if finite.size == 0:
+        return np.zeros(tile_img.shape, dtype=np.uint8)
+    max_value = float(finite.max())
+    if max_value > 255:
+        tile_float = tile_float / 256.0
+    tile_float = np.nan_to_num(tile_float, nan=0.0, posinf=255.0, neginf=0.0)
+    return np.ascontiguousarray(np.clip(tile_float, 0, 255).astype(np.uint8))
+
+
+def _normalize_tile_rgb(tile_img: np.ndarray) -> np.ndarray:
+    output = np.zeros(tile_img.shape, dtype=np.uint8)
+    for channel_index in range(tile_img.shape[2]):
+        channel = tile_img[:, :, channel_index]
+        valid = np.isfinite(channel)
+        if not np.any(valid):
+            continue
+        values = channel[valid]
+        lo = float(np.nanpercentile(values, 2))
+        hi = float(np.nanpercentile(values, 98))
+        if hi <= lo:
+            scaled = np.clip(channel, 0, 255)
+        else:
+            scaled = (channel - lo) * (255.0 / (hi - lo))
+        scaled = np.nan_to_num(scaled, nan=0.0, posinf=255.0, neginf=0.0)
+        output[:, :, channel_index] = np.clip(scaled, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(output)
+
+
+def _containing_leaf_for_disease(
+    disease: _DiseasePrediction,
+    leaves: list[_LeafPrediction],
+    _tile_x0: int,
+    _tile_y0: int,
+) -> _LeafPrediction | None:
+    return next((leaf for leaf in leaves if _point_in_polygon(disease.center, leaf.polygon)), None)
+
+
+def _nearest_leaf(
+    disease: _DiseasePrediction,
+    leaves: list[_LeafPrediction],
+) -> tuple[_LeafPrediction | None, float | None]:
+    if not leaves:
+        return None, None
+    dx, dy = disease.center
+    nearest = min(leaves, key=lambda leaf: (leaf.center[0] - dx) ** 2 + (leaf.center[1] - dy) ** 2)
+    distance = math.hypot(nearest.center[0] - dx, nearest.center[1] - dy)
+    return nearest, distance
+
+
+def _append_qa_disease_event(
+    events: list[dict],
+    qa_options: MappingQaOptions,
+    disease: _DiseasePrediction,
+    tile_index: int,
+    tile_bounds: tuple[int, int, int, int],
+    outcome: str,
+    reason: str,
+    matched_leaf: _LeafPrediction | None,
+    candidate_leaves: list[_LeafPrediction],
+    lat_lon: tuple[float, float] | None,
+    crop_path: str = "",
+) -> None:
+    if not qa_options.enabled or len(events) >= qa_options.event_limit:
+        return
+    nearest, nearest_distance = _nearest_leaf(disease, candidate_leaves)
+    event = {
+        "tile_index": tile_index,
+        "tile_pixel_bounds": [int(value) for value in tile_bounds],
+        "class_name": disease.class_name,
+        "confidence": disease.confidence,
+        "bbox_pixel": [round(float(value), 3) for value in disease.bbox],
+        "center_pixel": [round(float(value), 3) for value in disease.center],
+        "outcome": outcome,
+        "reason": reason,
+        "matched_leaf_id": matched_leaf.id if matched_leaf else "",
+        "matched_leaf_class": matched_leaf.class_name if matched_leaf else "",
+        "nearest_leaf_id": nearest.id if nearest else "",
+        "nearest_leaf_class": nearest.class_name if nearest else "",
+        "nearest_leaf_center_distance_px": round(nearest_distance, 3) if nearest_distance is not None else None,
+        "crop_path": crop_path,
+    }
+    if lat_lon is not None:
+        event["latitude"] = lat_lon[0]
+        event["longitude"] = lat_lon[1]
+    events.append(event)
+
+
+def _save_qa_disease_crop(
+    tile_img: np.ndarray,
+    disease: _DiseasePrediction,
+    qa_crop_dir: Path,
+    run_dir: Path,
+    tile_index: int,
+    event_index: int,
+    tile_x0: int,
+    tile_y0: int,
+    padding: int,
+) -> str:
+    try:
+        from PIL import Image
+    except Exception:
+        return ""
+
+    x1, y1, x2, y2 = disease.bbox
+    left = max(0, int(math.floor(x1 - tile_x0 - padding)))
+    top = max(0, int(math.floor(y1 - tile_y0 - padding)))
+    right = min(tile_img.shape[1], int(math.ceil(x2 - tile_x0 + padding)))
+    bottom = min(tile_img.shape[0], int(math.ceil(y2 - tile_y0 + padding)))
+    if right <= left or bottom <= top:
+        return ""
+    try:
+        qa_crop_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"tile{tile_index:05d}_event{event_index:05d}_{disease.class_name}.png"
+        crop_path = qa_crop_dir / filename
+        Image.fromarray(tile_img).crop((left, top, right, bottom)).save(crop_path)
+        return crop_path.relative_to(run_dir).as_posix()
+    except OSError:
+        return ""
+
+
+def save_qa_diagnostics(
+    qa_dir: str | Path,
+    geotiff_path: str | Path,
+    settings: dict,
+    summary: dict,
+    tile_summaries: list[dict],
+    disease_events: list[dict],
+    warnings: list[str],
+    events_truncated: bool,
+) -> Path:
+    output_dir = Path(qa_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "geotiff": str(geotiff_path),
+        "settings": settings,
+        "summary": summary,
+        "events_truncated": events_truncated,
+        "tile_summaries": tile_summaries,
+        "disease_events": disease_events,
+        "warnings": warnings,
+    }
+    path = output_dir / "banana_ai_mapping_qa_diagnostics.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
 
 
 def dedupe_records(records: Iterable[DetectionRecord], distance_m: float) -> list[DetectionRecord]:
@@ -428,6 +794,7 @@ _OUTPUT_FIELDS = [
     "image_name",
     "class_name",
     "health",
+    "source",
     "latitude",
     "longitude",
     "confidence",

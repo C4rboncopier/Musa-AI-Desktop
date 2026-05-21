@@ -462,6 +462,14 @@ class WorkspacePage(QWidget):
         layout.setContentsMargins(6, 10, 6, 0)
         layout.setSpacing(10)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+
         workflow = card("AI Mapping Workflow")
         w_layout = workflow.layout()
         self.geotiff_source_status = QLabel("Source: no GeoTIFF imported")
@@ -485,8 +493,73 @@ class WorkspacePage(QWidget):
         run_btn.setObjectName("primaryButton")
         run_btn.clicked.connect(lambda _=False: self.runMappingRequested.emit())
         w_layout.addWidget(run_btn)
-        layout.addWidget(workflow)
-        layout.addStretch(1)
+        content_layout.addWidget(workflow)
+
+        thresholds = card("Inference Settings")
+        threshold_layout = thresholds.layout()
+        self.leaf_confidence_value = QLabel("50%")
+        self.leaf_confidence_value.setObjectName("opacityValue")
+        leaf_row = QHBoxLayout()
+        leaf_label = QLabel("Leaf confidence")
+        leaf_label.setObjectName("bodyText")
+        leaf_row.addWidget(leaf_label)
+        leaf_row.addWidget(self.leaf_confidence_value, 1, Qt.AlignmentFlag.AlignRight)
+        threshold_layout.addLayout(leaf_row)
+        self.leaf_confidence_slider = QSlider(Qt.Orientation.Horizontal)
+        self.leaf_confidence_slider.setRange(1, 99)
+        self.leaf_confidence_slider.setValue(50)
+        self.leaf_confidence_slider.valueChanged.connect(
+            lambda value: self.leaf_confidence_value.setText(f"{value}%")
+        )
+        threshold_layout.addWidget(self.leaf_confidence_slider)
+
+        self.disease_confidence_value = QLabel("35%")
+        self.disease_confidence_value.setObjectName("opacityValue")
+        disease_row = QHBoxLayout()
+        disease_label = QLabel("Disease confidence")
+        disease_label.setObjectName("bodyText")
+        disease_row.addWidget(disease_label)
+        disease_row.addWidget(self.disease_confidence_value, 1, Qt.AlignmentFlag.AlignRight)
+        threshold_layout.addLayout(disease_row)
+        self.disease_confidence_slider = QSlider(Qt.Orientation.Horizontal)
+        self.disease_confidence_slider.setRange(1, 99)
+        self.disease_confidence_slider.setValue(35)
+        self.disease_confidence_slider.valueChanged.connect(
+            lambda value: self.disease_confidence_value.setText(f"{value}%")
+        )
+        threshold_layout.addWidget(self.disease_confidence_slider)
+
+        self.normalize_tiles_toggle = QCheckBox("Normalize AI tiles")
+        self.normalize_tiles_toggle.setChecked(True)
+        self.normalize_tiles_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        threshold_layout.addWidget(self.normalize_tiles_toggle)
+        self.match_cut_leaves_toggle = QCheckBox("Match cut leaves")
+        self.match_cut_leaves_toggle.setChecked(True)
+        self.match_cut_leaves_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        threshold_layout.addWidget(self.match_cut_leaves_toggle)
+        self.include_unmatched_toggle = QCheckBox("Include unmatched disease")
+        self.include_unmatched_toggle.setChecked(False)
+        self.include_unmatched_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        threshold_layout.addWidget(self.include_unmatched_toggle)
+        content_layout.addWidget(thresholds)
+
+        qa_card = card("QA Diagnostics")
+        qa_layout = qa_card.layout()
+        self.qa_mode_toggle = QCheckBox("Save QA report")
+        self.qa_mode_toggle.setChecked(False)
+        self.qa_mode_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        qa_layout.addWidget(self.qa_mode_toggle)
+        self.qa_crops_toggle = QCheckBox("Save disease crops")
+        self.qa_crops_toggle.setChecked(False)
+        self.qa_crops_toggle.setEnabled(False)
+        self.qa_crops_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        qa_layout.addWidget(self.qa_crops_toggle)
+        self.qa_mode_toggle.toggled.connect(self.qa_crops_toggle.setEnabled)
+        content_layout.addWidget(qa_card)
+
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         return tab
 
     def _metadata_tab(self) -> QWidget:
@@ -743,6 +816,18 @@ class WorkspacePage(QWidget):
         if 0 <= self._resolution_index < len(self._resolution_options):
             return self._resolution_options[self._resolution_index][1]
         return 100
+
+    def mapping_options(self) -> dict[str, object]:
+        qa_enabled = bool(self.qa_mode_toggle.isChecked())
+        return {
+            "leaf_confidence": self.leaf_confidence_slider.value() / 100.0,
+            "disease_confidence": self.disease_confidence_slider.value() / 100.0,
+            "normalize_tiles": self.normalize_tiles_toggle.isChecked(),
+            "match_disease_inside_cut_leaves": self.match_cut_leaves_toggle.isChecked(),
+            "include_unmatched_disease": self.include_unmatched_toggle.isChecked(),
+            "qa_enabled": qa_enabled,
+            "qa_save_crops": qa_enabled and self.qa_crops_toggle.isChecked(),
+        }
 
     def set_resolution_index(self, index: int) -> None:
         self._set_resolution_index(index)
