@@ -44,9 +44,9 @@ class OutputFileRow(QFrame):
 
     def _build_ui(self) -> None:
         layout = QGridLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(5)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(7)
 
         name = QLabel(self.item.path.name)
         name.setObjectName("outputTitle")
@@ -58,7 +58,7 @@ class OutputFileRow(QFrame):
         details.setObjectName("outputMeta")
 
         actions = QHBoxLayout()
-        actions.setSpacing(5)
+        actions.setSpacing(7)
         for text, signal in [
             ("Open", self.openRequested),
             ("Reveal", self.revealRequested),
@@ -360,6 +360,8 @@ class WorkspacePage(QWidget):
     def _build_right_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("workspaceInspector")
+        panel.setMinimumWidth(220)
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -378,7 +380,7 @@ class WorkspacePage(QWidget):
         tab = QWidget()
         tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setContentsMargins(6, 10, 6, 0)
         layout.setSpacing(12)
 
         resolution = card("GeoTIFF Display")
@@ -424,10 +426,12 @@ class WorkspacePage(QWidget):
         tab = QWidget()
         tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(6, 10, 6, 0)
+        layout.setSpacing(12)
 
         header = QHBoxLayout()
+        header.setContentsMargins(6, 0, 6, 0)
+        header.setSpacing(10)
         title = QLabel("Project Output Manager")
         title.setObjectName("panelTitle")
         refresh_btn = QPushButton("Refresh")
@@ -455,7 +459,7 @@ class WorkspacePage(QWidget):
         tab = QWidget()
         tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setContentsMargins(6, 10, 6, 0)
         layout.setSpacing(10)
 
         workflow = card("AI Mapping Workflow")
@@ -489,9 +493,26 @@ class WorkspacePage(QWidget):
         tab = QWidget()
         tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setContentsMargins(6, 10, 6, 0)
         layout.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("metadataScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content = QWidget()
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
         metadata = card("GeoTIFF Metadata")
+        metadata.setMinimumWidth(0)
+        metadata.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         md_layout = metadata.layout()
         fields = [
             "File",
@@ -516,17 +537,20 @@ class WorkspacePage(QWidget):
         ]
         for field in fields:
             row, value = meta_row(field, "--")
+            self._make_metadata_row_responsive(row, value)
             md_layout.addWidget(row)
             self.metadata_labels[field] = value
-        layout.addWidget(metadata)
-        layout.addStretch(1)
+        content_layout.addWidget(metadata)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         return tab
 
     def _logs_tab(self) -> QWidget:
         tab = QWidget()
         tab.setObjectName("inspectorTabPage")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setContentsMargins(6, 10, 6, 0)
         layout.setSpacing(8)
         self.log_output = QTextEdit()
         self.log_output.setObjectName("logConsole")
@@ -742,6 +766,23 @@ class WorkspacePage(QWidget):
             combo.addItem(label)
         combo.setCurrentIndex(self._resolution_index)
         return combo
+
+    @staticmethod
+    def _make_metadata_row_responsive(row: QWidget, value: QLabel) -> None:
+        row.setMinimumWidth(0)
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        value.setMinimumWidth(0)
+        value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        layout = row.layout()
+        if layout is None:
+            return
+        key_item = layout.itemAt(0)
+        key_label = key_item.widget() if key_item is not None else None
+        if key_label is not None:
+            key_label.setMinimumWidth(0)
+            key_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
 
     def _on_resolution_combo_changed(self, index: int) -> None:
         if self._syncing_resolution:

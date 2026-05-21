@@ -420,17 +420,43 @@ class MainWindow(QMainWindow):
             self.refresh_dashboard()
             return
 
-        answer = QMessageBox.question(
-            self,
-            "Delete Project",
-            "Delete this project from the local database?\n\n"
-            f"{project.name}\n\n"
-            "Linked GeoTIFFs, images, model files, and exported result files on disk will not be deleted.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+        output_dir = Path(project.output_dir) if project.output_dir else None
+        output_label = str(output_dir) if output_dir else "No project folder is recorded."
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle("Delete Project")
+        confirm.setText(f"Delete this project?\n\n{project.name}")
+        confirm.setInformativeText(
+            "Choose whether to remove only the local database record or also delete the project folder.\n\n"
+            f"Project folder:\n{output_label}"
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        database_only_btn = confirm.addButton("Delete Project Only", QMessageBox.ButtonRole.AcceptRole)
+        delete_folder_btn = confirm.addButton("Delete Project and Folder", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = confirm.addButton(QMessageBox.StandardButton.Cancel)
+        if output_dir is None or not output_dir.exists():
+            delete_folder_btn.setEnabled(False)
+            delete_folder_btn.setToolTip("The recorded project folder does not exist.")
+        confirm.setDefaultButton(cancel_btn)
+        confirm.exec()
+
+        clicked = confirm.clickedButton()
+        if clicked is cancel_btn:
             return
+        delete_project_folder = clicked is delete_folder_btn
+        if clicked is not database_only_btn and clicked is not delete_folder_btn:
+            return
+
+        if delete_project_folder:
+            folder_answer = QMessageBox.question(
+                self,
+                "Delete Project Folder",
+                "Permanently delete this project folder and all files inside it?\n\n"
+                f"{output_dir}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if folder_answer != QMessageBox.StandardButton.Yes:
+                return
 
         deleting_current = self.current_bundle is not None and self.current_bundle.project.id == project_id
         if deleting_current:
@@ -447,10 +473,34 @@ class MainWindow(QMainWindow):
             self.pending_geotiff = None
             self.pending_mapping = None
 
+        if delete_project_folder and output_dir is not None:
+            try:
+                self._delete_project_folder(output_dir)
+            except OSError as exc:
+                QMessageBox.critical(
+                    self,
+                    "Unable to delete project folder",
+                    f"The project was not deleted because the folder could not be removed.\n\n{exc}",
+                )
+                self.refresh_dashboard()
+                return
+
         self.repo.delete_project(project_id)
         self.refresh_dashboard()
         self.stack.setCurrentWidget(self.dashboard)
-        self.statusBar().showMessage("Project deleted from the local database.", 4000)
+        message = "Project and folder deleted." if delete_project_folder else "Project deleted from the local database."
+        self.statusBar().showMessage(message, 4000)
+
+    def _delete_project_folder(self, folder: Path) -> None:
+        folder = folder.resolve()
+        root = self.output_manager.root_dir.resolve()
+        if folder == root or folder.parent == folder:
+            raise OSError(f"Refusing to delete unsafe project folder: {folder}")
+        if not folder.exists():
+            return
+        if not folder.is_dir():
+            raise OSError(f"Recorded project folder is not a folder: {folder}")
+        shutil.rmtree(folder)
 
     def _preferred_model_paths(self) -> dict[str, str]:
         return {
@@ -562,6 +612,7 @@ class MainWindow(QMainWindow):
         self._project_open_dialog.set_progress(100, "Project ready.")
         self._project_open_dialog.finish()
         self._project_open_dialog = None
+        self._schedule_overlay_fit_to_screen()
         self.refresh_dashboard()
         self.statusBar().showMessage("Project loaded with linked GeoTIFF and saved results.", 5000)
 
@@ -1356,10 +1407,19 @@ class MainWindow(QMainWindow):
         self._run_js(f"setDetectionData({json.dumps(payload)});")
 
     def fit_overlay(self) -> None:
-        self._run_js("fitToOverlay();")
+        self._run_js("if (typeof fitToOverlay === 'function') fitToOverlay();")
+
+    def _schedule_overlay_fit_to_screen(self) -> None:
+        if self.current_geotiff is None:
+            return
+        for delay in (0, 150, 400, 800, 1400, 2200):
+            QTimer.singleShot(
+                delay,
+                lambda: self._run_js("if (typeof fitToOverlay === 'function') fitToOverlay(false);"),
+            )
 
     def reset_view(self) -> None:
-        self._run_js("resetView();")
+        self._run_js("if (typeof resetView === 'function') resetView();")
 
     def _set_overlay_visible(self, checked: bool) -> None:
         self._run_js(f"setOverlayVisible({str(checked).lower()});")

@@ -87,9 +87,9 @@ class AssetRow(QFrame):
         super().__init__(parent)
         self.setObjectName("assetRow")
         layout = QGridLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(2)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(5)
 
         state = StatusPill("Linked" if exists else "Missing", "ok" if exists else "danger")
         name = QLabel(title)

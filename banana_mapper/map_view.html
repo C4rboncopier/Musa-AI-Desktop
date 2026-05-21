@@ -77,21 +77,6 @@
       padding: 5px 10px;
       box-shadow: 0 8px 24px rgba(0,0,0,0.28);
     }
-    .coord-overlay {
-      position: absolute;
-      bottom: 6px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 900;
-      background: var(--attr-bg);
-      color: var(--attr-fg);
-      font-size: 10px;
-      font-family: "Cascadia Code", "Consolas", monospace;
-      padding: 3px 10px;
-      border-radius: 4px;
-      pointer-events: none;
-      white-space: nowrap;
-    }
     .layer-legend {
       position: absolute;
       bottom: 26px;
@@ -147,7 +132,6 @@
 </head>
 <body>
   <div id="map"></div>
-  <div id="coordOverlay" class="coord-overlay"></div>
   <div id="layerLegend" class="layer-legend">
     <div class="legend-title">AI Point Layers</div>
     <div class="legend-row"><span class="swatch" style="background:#fb923c"></span> Cut leaf</div>
@@ -167,6 +151,12 @@
       options: {
         maxZoom: 25,
         maxNativeZoom: 19,
+        detectRetina: false,
+        updateWhenIdle: true,
+        updateWhenZooming: false,
+        errorTileUrl: transparentTile(),
+        crossOrigin: false,
+        retryOnTileError: false,
         subdomains: "abc",
         attribution: "&copy; OpenStreetMap contributors"
       }
@@ -193,10 +183,10 @@
   var pendingMouseLatLng = null;
   var coordFrame = null;
   var lastBridgeCoordAt = 0;
-  var lastCoordTextAt = 0;
   var scanBoxLayer = null;
   var mapRefreshTimer = null;
   var mapRefreshUntil = 0;
+  var overlayFitTimers = [];
   var detectionVisibility = {
     full_leaf: false, cut_leaf: true,
     black_sigatoka: true, panama: true,
@@ -211,8 +201,6 @@
     healthy_leaf:   { color: "#16a34a", fill: "#4ade80", radius: 7, weight: 2, dash: null },
     diseased_leaf:  { color: "#ca8a04", fill: "#facc15", radius: 8, weight: 2, dash: null }
   };
-  var coordEl = document.getElementById("coordOverlay");
-
   function initializeMap() {
     if (typeof L === "undefined") {
       document.getElementById("map").innerHTML = '<div class="map-error">Leaflet could not be loaded.</div>';
@@ -230,6 +218,7 @@
     createMapPanes();
     baseTileLayer = createBaseTileLayer(activeBaseMap).addTo(map);
     L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
+    preventAttributionNavigation();
     pointRenderer = L.canvas({ padding: 0.35 });
     detectionGroup = L.layerGroup().addTo(map);
 
@@ -240,6 +229,7 @@
     map.on("click", handleDetectionClick);
     map.on("zoomend", function() {
       if (bridge) bridge.reportZoom(map.getZoom());
+      refreshBaseLayerAfterZoom();
       scheduleDetectionRender();
     });
     map.on("resize viewreset", function() { scheduleMapRefresh(250); });
@@ -277,10 +267,10 @@
       updateWhenZooming: true,
       updateInterval: 120,
       detectRetina: true,
-      crossOrigin: true
+      crossOrigin: false
     }, spec.options || {});
     var layer = L.tileLayer(spec.url, options);
-    layer.on("tileerror", function(e) {
+    if (options.retryOnTileError !== false) layer.on("tileerror", function(e) {
       var tile = e.tile;
       if (!tile || tile._musaRetryCount >= 2) return;
       tile._musaRetryCount = (tile._musaRetryCount || 0) + 1;
@@ -289,6 +279,24 @@
       }, 250 * tile._musaRetryCount);
     });
     return layer;
+  }
+
+  function refreshBaseLayerAfterZoom() {
+    if (!map || !baseTileLayer || activeBaseMap !== "osm") return;
+    var nativeMaxZoom = BASE_MAPS.osm.options.maxNativeZoom || 19;
+    if (map.getZoom() <= nativeMaxZoom) return;
+    scheduleMapRefresh(600);
+  }
+
+  function preventAttributionNavigation() {
+    document.addEventListener("click", function(event) {
+      var link = event.target && event.target.closest
+        ? event.target.closest(".leaflet-control-attribution a")
+        : null;
+      if (!link) return;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
   }
 
   function createGoogleTileLayer(mapType, attribution) {
@@ -400,10 +408,6 @@
     if (!pendingMouseLatLng) return;
     var ll = pendingMouseLatLng;
     var now = Date.now();
-    if (coordEl && now - lastCoordTextAt > 120) {
-      coordEl.textContent = ll.lat.toFixed(7) + ",  " + ll.lng.toFixed(7);
-      lastCoordTextAt = now;
-    }
     if (bridge && now - lastBridgeCoordAt > 900) {
       bridge.reportCoordinates(ll.lat, ll.lng);
       lastBridgeCoordAt = now;
@@ -755,11 +759,12 @@
     }).addTo(map);
     labelTooltip = L.tooltip({ permanent: false, direction: "top", className: "overlay-label" })
       .setLatLng(currentBounds.getCenter()).setContent(esc(payload.fileName)).addTo(map);
-    fitToOverlay();
+    scheduleOverlayFit();
     scheduleMapRefresh(3500);
   }
 
   function clearOverlay() {
+    clearOverlayFitTimers();
     if (!map) return;
     if (imageOverlay) { map.removeLayer(imageOverlay); imageOverlay = null; }
     if (extentRectangle) { map.removeLayer(extentRectangle); extentRectangle = null; }
@@ -1045,9 +1050,30 @@
     if (imageOverlay && overlayVisible) imageOverlay.setOpacity(opacity);
   }
 
-  function fitToOverlay() {
+  function clearOverlayFitTimers() {
+    overlayFitTimers.forEach(function(timer) { clearTimeout(timer); });
+    overlayFitTimers = [];
+  }
+
+  function scheduleOverlayFit() {
+    clearOverlayFitTimers();
+    [0, 120, 320, 700, 1300, 2200].forEach(function(delay) {
+      overlayFitTimers.push(setTimeout(function() {
+        fitToOverlay(delay > 0);
+      }, delay));
+    });
+  }
+
+  function fitToOverlay(animate) {
     if (map && currentBounds) {
-      map.fitBounds(currentBounds, { padding: [12, 12], animate: true, duration: 0.35 });
+      map.invalidateSize({ animate: false, pan: false });
+      var size = map.getSize();
+      if (size.x < 100 || size.y < 100) return;
+      map.fitBounds(currentBounds, {
+        padding: [12, 12],
+        animate: animate !== false,
+        duration: 0.35
+      });
       scheduleMapRefresh(1800);
     }
   }

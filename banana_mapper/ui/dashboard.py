@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.models import ProjectBundle
-from .widgets import EmptyState, MetricCard, StatusPill
+from .widgets import EmptyState, MetricCard
 
 
 class ProjectListHeader(QFrame):
@@ -26,7 +26,6 @@ class ProjectListHeader(QFrame):
         layout.setSpacing(12)
         for text, width, stretch in [
             ("Project", 0, 4),
-            ("Status", 120, 0),
             ("Assets", 82, 0),
             ("Results", 82, 0),
             ("Detections", 104, 0),
@@ -70,13 +69,6 @@ class ProjectListRow(QFrame):
         identity.addWidget(title)
         identity.addWidget(description)
         layout.addLayout(identity, 4)
-
-        state = StatusPill(
-            "Ready" if self.bundle.missing_path_count == 0 else f"{self.bundle.missing_path_count} missing",
-            "ok" if self.bundle.missing_path_count == 0 else "danger",
-        )
-        state.setFixedWidth(120)
-        layout.addWidget(state, 0, Qt.AlignmentFlag.AlignVCenter)
 
         for value, tooltip in [
             (str(len(self.bundle.assets) + len(self.bundle.models)), "Linked assets and models"),
@@ -201,8 +193,7 @@ class DashboardPage(QWidget):
         self.project_metric = MetricCard("Projects", "0")
         self.asset_metric = MetricCard("Linked Assets", "0")
         self.result_metric = MetricCard("Analysis Runs", "0")
-        self.missing_metric = MetricCard("Missing Paths", "0")
-        for metric in [self.project_metric, self.asset_metric, self.result_metric, self.missing_metric]:
+        for metric in [self.project_metric, self.asset_metric, self.result_metric]:
             metrics.addWidget(metric)
         content_layout.addLayout(metrics)
 
@@ -233,7 +224,6 @@ class DashboardPage(QWidget):
         self.project_metric.set_value(str(len(bundles)))
         self.asset_metric.set_value(str(sum(len(b.assets) + len(b.models) for b in bundles)))
         self.result_metric.set_value(str(sum(len(b.results) for b in bundles)))
-        self.missing_metric.set_value(str(sum(b.missing_path_count for b in bundles)))
         self._render_projects(bundles)
 
     def _apply_filter(self) -> None:
@@ -246,9 +236,9 @@ class DashboardPage(QWidget):
             if query in bundle.project.name.lower()
             or query in bundle.project.description.lower()
         ]
-        self._render_projects(filtered)
+        self._render_projects(filtered, search_active=True)
 
-    def _render_projects(self, bundles: list[ProjectBundle]) -> None:
+    def _render_projects(self, bundles: list[ProjectBundle], *, search_active: bool = False) -> None:
         while self.project_list.count():
             item = self.project_list.takeAt(0)
             widget = item.widget()
@@ -256,13 +246,19 @@ class DashboardPage(QWidget):
                 widget.deleteLater()
 
         if not bundles:
-            empty = EmptyState(
-                "No Projects Yet",
-                "Create a project to connect GeoTIFFs, AI models, and exports.",
-                "Create Project",
-            )
-            if empty.button:
-                empty.button.clicked.connect(lambda _=False: self.createRequested.emit())
+            if search_active:
+                empty = EmptyState(
+                    "No Matching Projects",
+                    "No projects match the current search.",
+                )
+            else:
+                empty = EmptyState(
+                    "No Projects Yet",
+                    "Create a project to connect GeoTIFFs, AI models, and exports.",
+                    "Create Project",
+                )
+                if empty.button:
+                    empty.button.clicked.connect(lambda _=False: self.createRequested.emit())
             self.project_list.addWidget(empty)
             return
 
