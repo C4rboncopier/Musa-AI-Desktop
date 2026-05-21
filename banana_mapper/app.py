@@ -514,6 +514,47 @@ class MainWindow(QMainWindow):
             if path and Path(path).exists():
                 self.repo.upsert_model(project_id, role, path, label=Path(path).name)
 
+    def _refresh_saved_models_for_mapping(self, bundle: ProjectBundle) -> ProjectBundle | None:
+        preferred = self._preferred_model_paths()
+        missing = {
+            role: path
+            for role, path in preferred.items()
+            if path and not Path(path).exists()
+        }
+        if missing:
+            labels = {
+                "leaf": "Leaf model",
+                "disease": "Disease model",
+            }
+            details = "\n".join(
+                f"{labels.get(role, role.title())}: {path}"
+                for role, path in missing.items()
+            )
+            QMessageBox.warning(
+                self,
+                "Saved AI model missing",
+                "The saved preferred model path no longer exists. "
+                "Choose a valid model before running AI mapping.\n\n"
+                f"{details}",
+            )
+            return None
+
+        updated_roles: list[str] = []
+        for role, path in preferred.items():
+            if not path:
+                continue
+            model_path = str(Path(path))
+            current = bundle.first_model(role)
+            if current is None or current.path != model_path:
+                updated_roles.append(role)
+                self.repo.upsert_model(bundle.project.id, role, model_path, label=Path(model_path).name)
+
+        if updated_roles:
+            role_labels = ", ".join(role.replace("_", " ") for role in updated_roles)
+            self.workspace.append_log(f"Loaded current saved AI model setting(s): {role_labels}.")
+            return self._reload_current_bundle() or self.repo.get_bundle(bundle.project.id)
+        return bundle
+
     def open_project(self, project_id: str) -> None:
         if self._active_worker is not None and self._active_worker.isRunning():
             QMessageBox.information(
@@ -1187,6 +1228,10 @@ class MainWindow(QMainWindow):
         if bundle is None:
             return
         if self._active_mapping_worker is not None and self._active_mapping_worker.isRunning():
+            return
+
+        bundle = self._refresh_saved_models_for_mapping(bundle)
+        if bundle is None:
             return
 
         leaf = bundle.first_model("leaf")
