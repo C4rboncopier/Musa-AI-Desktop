@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Musa AI Experimental Comparison Map</title>
+  <link rel="stylesheet" href="../banana_mapper/vendor/leaflet/leaflet.css">
+  <style>
+    html, body, #map {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      background: #070b12;
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+    .leaflet-container {
+      background: #070b12;
+      color: #dbeafe;
+    }
+    .leaflet-control-attribution {
+      background: rgba(15, 23, 42, 0.88) !important;
+      color: #94a3b8 !important;
+      border-radius: 4px 0 0 0;
+      font-size: 10px;
+    }
+    .leaflet-control-attribution a { color: #93c5fd !important; }
+    .legend {
+      position: absolute;
+      z-index: 900;
+      right: 12px;
+      bottom: 18px;
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 8px;
+      color: #cbd5e1;
+      min-width: 230px;
+      padding: 10px 12px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    }
+    .legend h4 {
+      margin: 0 0 8px;
+      color: #f8fafc;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      line-height: 1.8;
+    }
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 2px solid rgba(255, 255, 255, 0.7);
+      display: inline-block;
+    }
+    .hint {
+      align-items: center;
+      color: #cbd5e1;
+      display: flex;
+      font-size: 15px;
+      height: auto;
+      justify-content: center;
+      pointer-events: none;
+      position: absolute;
+      left: 50%;
+      padding: 10px 14px;
+      top: 14px;
+      transform: translateX(-50%);
+      text-align: center;
+      width: auto;
+      z-index: 800;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 8px;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.22);
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="hint" class="hint">Load one RGB image to begin the comparison map.</div>
+  <div class="legend">
+    <h4>Detection Layers</h4>
+    <div class="legend-row"><span class="swatch" style="background:#22d3ee"></span> Full leaf</div>
+    <div class="legend-row"><span class="swatch" style="background:#fb923c"></span> Cut leaf</div>
+    <div class="legend-row"><span class="swatch" style="background:#a78bfa"></span> Black sigatoka</div>
+    <div class="legend-row"><span class="swatch" style="background:#f87171"></span> Panama</div>
+    <div class="legend-row" style="margin-top:6px"><span class="swatch" style="background:#ffffff;border-color:#ffffff"></span> MUSA solid stroke</div>
+    <div class="legend-row"><span class="swatch" style="background:#ffffff;border-color:#111827"></span> Gemini dark stroke</div>
+  </div>
+
+  <script src="../banana_mapper/vendor/leaflet/leaflet.js"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script>
+    var map = L.map("map", {
+      zoomControl: true,
+      attributionControl: true,
+      preferCanvas: true
+    });
+    map.setView([11.0, 122.0], 6);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 22,
+      maxNativeZoom: 19,
+      detectRetina: false,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    var imageLayer = null;
+    var imageBounds = null;
+    var imageSize = { width: 1, height: 1 };
+    var markerLayer = L.layerGroup().addTo(map);
+    var scanBoxLayers = {};
+    var allPoints = [];
+    var visibility = { gemini: true, musa: true };
+
+    var classStyles = {
+      full_leaf: { color: "#22d3ee", label: "Full leaf" },
+      cut_leaf: { color: "#fb923c", label: "Cut leaf" },
+      black_sigatoka: { color: "#a78bfa", label: "Black sigatoka" },
+      panama: { color: "#f87171", label: "Panama" }
+    };
+
+    function initializeBridge() {
+      if (typeof qt === "undefined" || !qt.webChannelTransport) return;
+      new QWebChannel(qt.webChannelTransport, function(channel) {
+        if (channel.objects.experimentMapBridge) {
+          channel.objects.experimentMapBridge.reportMapReady();
+        }
+      });
+    }
+
+    function setImage(payload) {
+      clearImage();
+      var width = Number(payload.width || 1);
+      var height = Number(payload.height || 1);
+      imageSize = { width: width, height: height };
+      imageBounds = payload.bounds ? [
+        [Number(payload.bounds.south), Number(payload.bounds.west)],
+        [Number(payload.bounds.north), Number(payload.bounds.east)]
+      ] : imageOverlayBounds(width, height, payload.metadata || {});
+      imageLayer = L.imageOverlay(payload.imageUrl, imageBounds, {
+        opacity: 0.92,
+        interactive: false
+      }).addTo(map);
+      L.rectangle(imageBounds, {
+        color: "#38bdf8",
+        weight: 1,
+        fill: false,
+        opacity: 0.8,
+        dashArray: "8 5"
+      }).addTo(markerLayer);
+      map.fitBounds(imageBounds, { padding: [16, 16], animate: false });
+      document.getElementById("hint").style.display = "none";
+    }
+
+    function imageOverlayBounds(width, height, metadata) {
+      // Fallback: if the image has GPS center but no usable camera footprint,
+      // place a small extent around the GPS point. If no GPS exists, use a
+      // neutral Philippines-centered demo extent.
+      var centerLat = Number(metadata.latitude);
+      var centerLng = Number(metadata.longitude);
+      if (!isFinite(centerLat) || !isFinite(centerLng)) {
+        centerLat = 11.0;
+        centerLng = 122.0;
+      }
+      var fallbackGroundWidthM = 120;
+      var fallbackGroundHeightM = fallbackGroundWidthM * (height / Math.max(1, width));
+      var latSpan = fallbackGroundHeightM / 111320.0;
+      var lngSpan = fallbackGroundWidthM / Math.max(1e-9, 111320.0 * Math.cos(centerLat * Math.PI / 180));
+      return [
+        [centerLat - latSpan / 2, centerLng - lngSpan / 2],
+        [centerLat + latSpan / 2, centerLng + lngSpan / 2]
+      ];
+    }
+
+    function clearImage() {
+      if (imageLayer) {
+        map.removeLayer(imageLayer);
+        imageLayer = null;
+      }
+      markerLayer.clearLayers();
+      allPoints = [];
+      imageBounds = null;
+      imageSize = { width: 1, height: 1 };
+      clearScanBoxes();
+    }
+
+    function setDetections(payload) {
+      allPoints = payload.points || [];
+      renderPoints();
+    }
+
+    function setSourceVisible(source, visible) {
+      visibility[source] = visible;
+      renderPoints();
+    }
+
+    function renderPoints() {
+      markerLayer.clearLayers();
+      if (imageBounds) {
+        L.rectangle(imageBounds, {
+          color: "#38bdf8",
+          weight: 1,
+          fill: false,
+          opacity: 0.8,
+          dashArray: "8 5"
+        }).addTo(markerLayer);
+      }
+      allPoints.forEach(function(point) {
+        if (visibility[point.source] === false) return;
+        var x = Number(point.x);
+        var y = Number(point.y);
+        if (!isFinite(x) || !isFinite(y)) return;
+        var style = classStyles[point.class_name] || { color: "#e2e8f0", label: point.class_name };
+        var latLng = pixelToLatLng(x, y);
+        if (!latLng) return;
+        var marker = L.circleMarker(latLng, {
+          radius: point.source === "gemini" ? 6 : 5,
+          color: point.source === "gemini" ? "#111827" : "#ffffff",
+          weight: point.source === "gemini" ? 2 : 1.5,
+          fillColor: style.color,
+          fillOpacity: point.source === "gemini" ? 0.74 : 0.92,
+          opacity: 1
+        }).addTo(markerLayer);
+        marker.bindPopup(popupHtml(point, style.label));
+      });
+    }
+
+    function pixelToLatLng(x, y) {
+      if (!imageBounds) return null;
+      var south = imageBounds[0][0];
+      var west = imageBounds[0][1];
+      var north = imageBounds[1][0];
+      var east = imageBounds[1][1];
+      var lng = west + (x / Math.max(1, imageSize.width)) * (east - west);
+      var lat = north - (y / Math.max(1, imageSize.height)) * (north - south);
+      return [lat, lng];
+    }
+
+    function setScanBoxPixel(source, x0, y0, x1, y1, label) {
+      if (!imageBounds) return;
+      source = String(source || "default").toLowerCase();
+      clearScanBox(source);
+      var inset = source === "gemini" ? 5 : 0;
+      var nw = pixelToLatLng(Number(x0) + inset, Number(y0) + inset);
+      var se = pixelToLatLng(Number(x1) - inset, Number(y1) - inset);
+      if (!nw || !se) return;
+      var style = source === "gemini"
+        ? { color: "#06b6d4", fillColor: "#67e8f9", dashArray: "4 5" }
+        : { color: "#f59e0b", fillColor: "#facc15", dashArray: "10 6" };
+      scanBoxLayers[source] = L.rectangle([nw, se], {
+        color: style.color,
+        weight: 3,
+        opacity: 0.95,
+        fillColor: style.fillColor,
+        fillOpacity: 0.14,
+        dashArray: style.dashArray
+      }).addTo(map);
+      if (label) {
+        scanBoxLayers[source].bindTooltip(esc(label), {
+          permanent: false,
+          direction: "top",
+          opacity: 0.92
+        });
+      }
+    }
+
+    function clearScanBox(source) {
+      source = String(source || "default").toLowerCase();
+      if (scanBoxLayers[source]) {
+        map.removeLayer(scanBoxLayers[source]);
+        delete scanBoxLayers[source];
+      }
+    }
+
+    function clearScanBoxes() {
+      Object.keys(scanBoxLayers).forEach(function(source) {
+        clearScanBox(source);
+      });
+    }
+
+    function popupHtml(point, label) {
+      var conf = point.confidence === null || point.confidence === undefined
+        ? "N/A"
+        : (Number(point.confidence) * 100).toFixed(1) + "%";
+      return (
+        '<div style="font-size:12px;line-height:1.55;min-width:190px">' +
+        '<div style="font-weight:700;margin-bottom:4px">' + esc(label || point.class_name) + '</div>' +
+        '<div><b>Source:</b> ' + esc(point.source) + '</div>' +
+        '<div><b>Confidence:</b> ' + esc(conf) + '</div>' +
+        '<div><b>X/Y:</b> ' + Number(point.x).toFixed(1) + ', ' + Number(point.y).toFixed(1) + '</div>' +
+        (point.description ? '<div style="margin-top:5px;color:#475569">' + esc(point.description) + '</div>' : '') +
+        '</div>'
+      );
+    }
+
+    function esc(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    initializeBridge();
+  </script>
+</body>
+</html>
