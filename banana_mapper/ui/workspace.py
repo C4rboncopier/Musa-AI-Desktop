@@ -96,9 +96,13 @@ class WorkspacePage(QWidget):
     overlayOpacityChanged = pyqtSignal(int)
     detectionOpacityChanged = pyqtSignal(int)
     detectionLayerChanged = pyqtSignal(str, bool)
+    detectionStyleChanged = pyqtSignal(str, bool)
     resolutionChanged = pyqtSignal(int)
     projectExplorerVisibilityChanged = pyqtSignal(bool)
     inspectorVisibilityChanged = pyqtSignal(bool)
+    importCsvRequested = pyqtSignal()
+    drawOnMapRequested = pyqtSignal()
+
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -108,6 +112,7 @@ class WorkspacePage(QWidget):
         self.metadata_labels: dict[str, QLabel] = {}
         self.count_labels: dict[str, QLabel] = {}
         self.layer_toggles: dict[str, QCheckBox] = {}
+        self.style_toggles: dict[str, QCheckBox] = {}
         self.splitter: QSplitter | None = None
         self.left_panel: QWidget | None = None
         self.right_panel: QWidget | None = None
@@ -271,6 +276,8 @@ class WorkspacePage(QWidget):
         lc_layout.addWidget(self.ai_opacity_slider)
 
         layer_specs = [
+            ("healthy_leaf", "Healthy leaf canopies"),
+            ("diseased_leaf", "Diseased leaf canopies"),
             ("cut_leaf", "Cut leaf points"),
             ("black_sigatoka", "Black sigatoka points"),
             ("panama", "Panama points"),
@@ -282,6 +289,21 @@ class WorkspacePage(QWidget):
             self.layer_toggles[key] = checkbox
             lc_layout.addWidget(checkbox)
         layout.addWidget(layer_card)
+
+        style_card = card("Visual Styles")
+        sc_layout = style_card.layout()
+        style_specs = [
+            ("show_dots", "Show center dots", True),
+            ("show_bboxes", "Show bounding boxes", True),
+            ("show_polygons", "Show polygon masks", False),
+        ]
+        for key, label, default_state in style_specs:
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(default_state)
+            checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.style_toggles[key] = checkbox
+            sc_layout.addWidget(checkbox)
+        layout.addWidget(style_card)
 
         counts = card("Detection Counts")
         counts_layout = counts.layout()
@@ -408,6 +430,23 @@ class WorkspacePage(QWidget):
         res_layout.addWidget(self.processing_resolution_label)
         res_layout.addWidget(self.downsample_label)
         layout.addWidget(resolution)
+
+        csv_import = card("CSV Coordinate Import")
+        csv_layout = csv_import.layout()
+        csv_helper = QLabel("Import disease locations from a CSV file and plot them on the map.")
+        csv_helper.setObjectName("bodyText")
+        csv_helper.setWordWrap(True)
+        csv_layout.addWidget(csv_helper)
+        self.import_csv_btn = QPushButton("Import CSV")
+        self.import_csv_btn.setObjectName("primaryButton")
+        self.import_csv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        csv_layout.addWidget(self.import_csv_btn)
+        self.draw_on_map_btn = QPushButton("Draw on Map")
+        self.draw_on_map_btn.setObjectName("primaryButton")
+        self.draw_on_map_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.draw_on_map_btn.setEnabled(False)
+        csv_layout.addWidget(self.draw_on_map_btn)
+        layout.addWidget(csv_import)
 
         layout.addWidget(section_label("Linked Assets"))
         scroll = QScrollArea()
@@ -635,6 +674,8 @@ class WorkspacePage(QWidget):
     def _connect_ui(self) -> None:
         self.back_btn.clicked.connect(lambda _=False: self.backRequested.emit())
         self.import_geotiff_btn.clicked.connect(lambda _=False: self.importGeoTiffRequested.emit())
+        self.import_csv_btn.clicked.connect(lambda _=False: self.importCsvRequested.emit())
+        self.draw_on_map_btn.clicked.connect(lambda _=False: self.drawOnMapRequested.emit())
         self.run_btn.clicked.connect(lambda _=False: self.runMappingRequested.emit())
         self.visibility_toggle.toggled.connect(self.overlayVisibilityChanged.emit)
         self.opacity_slider.valueChanged.connect(self._overlay_opacity_changed)
@@ -645,6 +686,14 @@ class WorkspacePage(QWidget):
             checkbox.toggled.connect(
                 lambda checked, layer_key=key: self.detectionLayerChanged.emit(layer_key, checked)
             )
+        for key, checkbox in self.style_toggles.items():
+            checkbox.toggled.connect(
+                lambda checked, style_key=key: self.detectionStyleChanged.emit(style_key, checked)
+            )
+
+    def set_draw_button_enabled(self, enabled: bool) -> None:
+        self.draw_on_map_btn.setEnabled(enabled)
+
 
     def load_map(self) -> None:
         html_path = Path(__file__).resolve().parent.parent / "map_view.html"

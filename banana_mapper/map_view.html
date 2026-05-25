@@ -192,6 +192,7 @@
     black_sigatoka: true, panama: true,
     healthy_leaf: false, diseased_leaf: false
   };
+    var detectionStyles = { show_dots: true, show_bboxes: true, show_polygons: false };
 
   var CLASS_STYLES = {
     full_leaf:      { color: "#0891b2", fill: "#22d3ee", radius: 7, weight: 2, dash: null },
@@ -776,6 +777,7 @@
     if (!mapReady) { pendingDetections = payload; return; }
     clearDetections();
     detectionVisibility = Object.assign(detectionVisibility, payload.visibility || {});
+      detectionStyles = Object.assign(detectionStyles, payload.styles || {});
     if (typeof payload.opacity === "number") {
       detectionOpacity = Math.max(0, Math.min(1, payload.opacity));
     }
@@ -808,11 +810,48 @@
   }
 
   function buildDetectionLayer(rec) {
-    var layer = L.circleMarker([rec._lat, rec._lng], pointStyle(rec));
-    layer._record = rec;
-    layer._layerKeys = rec._layerKeys;
-    layer.bindPopup(buildPopup(rec), { maxWidth: 320 });
-    return layer;
+    var group = L.featureGroup();
+    var style = pointStyle(rec);
+
+    // Draw the polygon mask if it exists
+    if (rec.polygon_wgs84 && rec.polygon_wgs84.length >= 3 && detectionStyles.show_polygons) {
+      var polyStyle = vectorStyle(rec);
+      // Make the mask fill more subtle than the dot
+      polyStyle.fillOpacity = Math.max(0.1, (polyStyle.fillOpacity || 0.4) * 0.4);
+      polyStyle.opacity = Math.max(0.2, (polyStyle.opacity || 0.5) * 0.5);
+      polyStyle.interactive = false; // Let the dot handle clicks/tooltips
+      polyStyle.isPolygonMask = true;
+
+      var polygon = L.polygon(rec.polygon_wgs84, polyStyle);
+      group.addLayer(polygon);
+    }
+
+    // Draw the bounding box if it exists
+    if (rec.bbox_wgs84 && rec.bbox_wgs84.length >= 2 && detectionStyles.show_bboxes) {
+      var bboxStyle = vectorStyle(rec);
+      bboxStyle.fillOpacity = Math.max(0.02, (bboxStyle.fillOpacity || 0.4) * 0.1);
+      bboxStyle.opacity = Math.max(0.4, bboxStyle.opacity || 0.8);
+      bboxStyle.weight = Math.max(1, (bboxStyle.weight || 2) - 0.5);
+      bboxStyle.interactive = false;
+      bboxStyle.isBboxMask = true;
+      
+      var rectangle = L.rectangle(rec.bbox_wgs84, bboxStyle);
+      group.addLayer(rectangle);
+    }
+
+    // Draw the center dot on top
+    if (detectionStyles.show_dots || (!detectionStyles.show_polygons && !detectionStyles.show_bboxes)) {
+      var marker = L.circleMarker([rec._lat, rec._lng], style);
+      marker.bindPopup(buildPopup(rec), { maxWidth: 320 });
+      group.addLayer(marker);
+    }
+
+    group._record = rec;
+    group._layerKeys = rec._layerKeys;
+    
+    // Bind the popup to the group so clicking anywhere on the feature works
+    group.bindPopup(buildPopup(rec), { maxWidth: 320 });
+    return group;
   }
 
   function normalizeLatLngs(points) {
@@ -827,6 +866,15 @@
     scheduleDetectionRender(true);
   }
 
+  function setDetectionStyle(styleKey, visible) {
+    detectionStyles[styleKey] = visible;
+    // Clear cached layers so they are rebuilt completely with the new shapes
+    if (detectionGroup) detectionGroup.clearLayers();
+    detectionLayerById = {};
+    detectionLayers = [];
+    scheduleDetectionRender(true);
+  }
+
   function setDetectionOpacity(opacity) {
     detectionOpacity = Math.max(0, Math.min(1, opacity));
     if (detectionOpacity <= 0 || detectionLayers.length === 0) {
@@ -836,7 +884,26 @@
     detectionLayers.forEach(function(layer) {
       if (!layer._record) return;
       if (layer.setStyle) {
-        layer.setStyle(layer instanceof L.CircleMarker ? pointStyle(layer._record) : vectorStyle(layer._record));
+        if (layer instanceof L.FeatureGroup) {
+          layer.eachLayer(function(child) {
+              if (child.options && child.options.isPolygonMask) {
+              var st = vectorStyle(layer._record);
+              st.fillOpacity = Math.max(0.1, (st.fillOpacity || 0.4) * 0.4);
+                st.opacity = Math.max(0.2, (st.opacity || 0.5) * 0.5);
+              child.setStyle(st);
+              } else if (child.options && child.options.isBboxMask) {
+                var bboxStyle = vectorStyle(layer._record);
+                bboxStyle.fillOpacity = Math.max(0.02, (bboxStyle.fillOpacity || 0.4) * 0.1);
+                bboxStyle.opacity = Math.max(0.4, bboxStyle.opacity || 0.8);
+                bboxStyle.weight = Math.max(1, (bboxStyle.weight || 2) - 0.5);
+                child.setStyle(bboxStyle);
+            } else if (child instanceof L.CircleMarker) {
+              child.setStyle(pointStyle(layer._record));
+            }
+          });
+        } else {
+          layer.setStyle(layer instanceof L.CircleMarker ? pointStyle(layer._record) : vectorStyle(layer._record));
+        }
       }
     });
   }
@@ -874,7 +941,26 @@
       wanted[id] = true;
       var layer = detectionLayerById[id];
       if (layer) {
-        layer.setStyle(pointStyle(rec));
+        if (layer instanceof L.FeatureGroup) {
+          layer.eachLayer(function(child) {
+              if (child.options && child.options.isPolygonMask) {
+              var st = vectorStyle(rec);
+              st.fillOpacity = Math.max(0.1, (st.fillOpacity || 0.4) * 0.4);
+                st.opacity = Math.max(0.2, (st.opacity || 0.5) * 0.5);
+              child.setStyle(st);
+              } else if (child.options && child.options.isBboxMask) {
+                var bboxStyle = vectorStyle(rec);
+                bboxStyle.fillOpacity = Math.max(0.02, (bboxStyle.fillOpacity || 0.4) * 0.1);
+                bboxStyle.opacity = Math.max(0.4, bboxStyle.opacity || 0.8);
+                bboxStyle.weight = Math.max(1, (bboxStyle.weight || 2) - 0.5);
+                child.setStyle(bboxStyle);
+            } else if (child instanceof L.CircleMarker) {
+              child.setStyle(pointStyle(rec));
+            }
+          });
+        } else if (layer.setStyle) {
+          layer.setStyle(pointStyle(rec));
+        }
         continue;
       }
       layer = buildDetectionLayer(rec);
@@ -907,7 +993,9 @@
     for (var i = 0; i < detectionLayers.length; i++) {
       var layer = detectionLayers[i];
       if (!layer || !layer._record) continue;
-      var point = map.latLngToContainerPoint(layer.getLatLng());
+      // FeatureGroups don't have getLatLng(), fallback to the record's lat/lon
+      var latlng = (layer.getLatLng) ? layer.getLatLng() : L.latLng(layer._record._lat, layer._record._lng);
+      var point = map.latLngToContainerPoint(latlng);
       var distance = point.distanceTo(clickPoint);
       if (distance < bestDistance) {
         bestDistance = distance;

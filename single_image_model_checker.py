@@ -66,6 +66,7 @@ class SingleImageModelChecker:
         self.raw_disease_outside_count = 0
 
         self.show_heatmap = BooleanVar(value=True)
+        self.show_tile_heatmap = BooleanVar(value=False)
         self.confidence = DoubleVar(value=0.50)
         self.slice_size = IntVar(value=512)
         self.slice_overlap = IntVar(value=96)
@@ -151,8 +152,21 @@ class SingleImageModelChecker:
 
         tk.Checkbutton(
             card,
-            text="Show heatmap",
+            text="Show radial heatmap",
             variable=self.show_heatmap,
+            command=self.rebuild_overlay,
+            bg="#111827",
+            fg="#dbeafe",
+            selectcolor="#0f172a",
+            activebackground="#111827",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", padx=10, pady=(0, 5))
+
+        tk.Checkbutton(
+            card,
+            text="Show tile heatmap",
+            variable=self.show_tile_heatmap,
             command=self.rebuild_overlay,
             bg="#111827",
             fg="#dbeafe",
@@ -413,6 +427,9 @@ class SingleImageModelChecker:
         if self.show_heatmap.get() and self.records:
             base = self._apply_heatmap(base)
 
+        if getattr(self, "show_tile_heatmap", None) and self.show_tile_heatmap.get() and self.records:
+            base = self._apply_tile_heatmap(base)
+
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay, "RGBA")
 
@@ -446,6 +463,51 @@ class SingleImageModelChecker:
             cx, cy = disease.center
             draw.line((cx - 10, cy, cx + 10, cy), fill=color, width=3)
             draw.line((cx, cy - 10, cx, cy + 10), fill=color, width=3)
+
+        return Image.alpha_composite(base, overlay)
+
+    def _apply_tile_heatmap(self, base: Image.Image) -> Image.Image:
+        tile_size = self.slice_size.get()
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay, "RGBA")
+
+        drawn_tiles = set()
+
+        for leaf in self.leaves:
+            if leaf.class_name == "full_leaf":
+                health_key = "diseased_leaf" if leaf.health == "diseased" else "healthy_leaf"
+                if not (self.class_vars["full_leaf"].get() or self.class_vars[health_key].get()):
+                    continue
+                color = CLASS_COLORS[health_key if self.class_vars[health_key].get() else "full_leaf"]
+            elif leaf.class_name == "cut_leaf":
+                if not self.class_vars["cut_leaf"].get():
+                    continue
+                color = CLASS_COLORS["cut_leaf"]
+            else:
+                continue
+
+            # ~55% Opacity (140 out of 255)
+            fill_color = (color[0], color[1], color[2], 140)
+            cx, cy = leaf.center
+            tx, ty = int(cx // tile_size) * tile_size, int(cy // tile_size) * tile_size
+            
+            # Prevent over-drawing the same grid block to maintain consistent opacity
+            tile_key = (tx, ty, leaf.class_name)
+            if tile_key not in drawn_tiles:
+                draw.rectangle((tx, ty, tx + tile_size, ty + tile_size), fill=fill_color)
+                drawn_tiles.add(tile_key)
+
+        for disease in self.diseases:
+            if not self._class_visible(disease.class_name):
+                continue
+            color = CLASS_COLORS.get(disease.class_name, (255, 255, 255, 255))
+            fill_color = (color[0], color[1], color[2], 140)
+            cx, cy = disease.center
+            tx, ty = int(cx // tile_size) * tile_size, int(cy // tile_size) * tile_size
+            tile_key = (tx, ty, disease.class_name)
+            if tile_key not in drawn_tiles:
+                draw.rectangle((tx, ty, tx + tile_size, ty + tile_size), fill=fill_color)
+                drawn_tiles.add(tile_key)
 
         return Image.alpha_composite(base, overlay)
 
