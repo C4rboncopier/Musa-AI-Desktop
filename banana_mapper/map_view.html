@@ -192,7 +192,7 @@
     black_sigatoka: true, panama: true,
     healthy_leaf: false, diseased_leaf: false
   };
-    var detectionStyles = { show_dots: true, show_bboxes: true, show_polygons: false };
+    var detectionStyles = { show_dots: true, show_bboxes: true, show_polygons: false, show_tile_heatmap: false };
 
   var CLASS_STYLES = {
     full_leaf:      { color: "#0891b2", fill: "#22d3ee", radius: 7, weight: 2, dash: null },
@@ -222,6 +222,8 @@
     preventAttributionNavigation();
     pointRenderer = L.canvas({ padding: 0.35 });
     detectionGroup = L.layerGroup().addTo(map);
+    heatmapGroup = L.layerGroup().addTo(map);
+    heatmapTiles = {};
 
     map.on("mousemove", function(e) {
       pendingMouseLatLng = e.latlng;
@@ -788,6 +790,8 @@
 
   function clearDetections() {
     if (detectionGroup) detectionGroup.clearLayers();
+    if (heatmapGroup) heatmapGroup.clearLayers();
+    heatmapTiles = {};
     if (detectionRenderTimer) {
       clearTimeout(detectionRenderTimer);
       detectionRenderTimer = null;
@@ -840,7 +844,7 @@
     }
 
     // Draw the center dot on top
-    if (detectionStyles.show_dots || (!detectionStyles.show_polygons && !detectionStyles.show_bboxes)) {
+    if (detectionStyles.show_dots) {
       var marker = L.circleMarker([rec._lat, rec._lng], style);
       marker.bindPopup(buildPopup(rec), { maxWidth: 320 });
       group.addLayer(marker);
@@ -870,6 +874,8 @@
     detectionStyles[styleKey] = visible;
     // Clear cached layers so they are rebuilt completely with the new shapes
     if (detectionGroup) detectionGroup.clearLayers();
+    if (heatmapGroup) heatmapGroup.clearLayers();
+    heatmapTiles = {};
     detectionLayerById = {};
     detectionLayers = [];
     scheduleDetectionRender(true);
@@ -906,6 +912,16 @@
         }
       }
     });
+    if (heatmapGroup) {
+      heatmapGroup.eachLayer(function(child) {
+        if (child._record) {
+          var st = vectorStyle(child._record);
+          st.fillOpacity = Math.max(0.15, (st.fillOpacity || 0.4) * 1.5);
+          st.opacity = 0;
+          child.setStyle(st);
+        }
+      });
+    }
   }
 
   function scheduleDetectionRender(immediate) {
@@ -916,11 +932,13 @@
 
   function renderVisibleDetections() {
     detectionRenderTimer = null;
-    if (!map || !detectionGroup) return;
+    if (!map || !detectionGroup || !heatmapGroup) return;
     if (!allRecords.length || detectionOpacity <= 0) {
       detectionGroup.clearLayers();
+      heatmapGroup.clearLayers();
       detectionLayers = [];
       detectionLayerById = {};
+      heatmapTiles = {};
       return;
     }
 
@@ -935,10 +953,19 @@
 
     var stride = Math.max(1, Math.ceil(visible.length / MAX_VISIBLE_POINTS));
     var wanted = {};
+    var wantedHeatmapTiles = {};
     for (var j = 0; j < visible.length; j += stride) {
       var rec = visible[j];
       var id = rec._renderId;
       wanted[id] = true;
+
+      if (detectionStyles.show_tile_heatmap && rec.heatmap_tile_wgs84 && rec.heatmap_tile_wgs84.length >= 2) {
+        // Generate unique key using the WGS84 bounding coordinate string + the class type
+        var tileKey = rec.heatmap_tile_wgs84[0][0].toFixed(5) + "," + rec.heatmap_tile_wgs84[0][1].toFixed(5) + "_" + rec.class_name;
+        if (!wantedHeatmapTiles[tileKey]) {
+          wantedHeatmapTiles[tileKey] = { bounds: rec.heatmap_tile_wgs84, rec: rec };
+        }
+      }
       var layer = detectionLayerById[id];
       if (layer) {
         if (layer instanceof L.FeatureGroup) {
@@ -981,6 +1008,32 @@
     });
     if (!detectionLayers.length) {
       detectionGroup.clearLayers();
+    }
+
+    // Sync Heatmap Grid Blocks
+    if (detectionStyles.show_tile_heatmap) {
+      Object.keys(heatmapTiles).forEach(function(key) {
+        if (!wantedHeatmapTiles[key]) {
+          heatmapGroup.removeLayer(heatmapTiles[key]);
+          delete heatmapTiles[key];
+        }
+      });
+      Object.keys(wantedHeatmapTiles).forEach(function(key) {
+        if (!heatmapTiles[key]) {
+          var tData = wantedHeatmapTiles[key];
+          var style = vectorStyle(tData.rec);
+          style.fillOpacity = Math.max(0.15, (style.fillOpacity || 0.4) * 1.5);
+          style.opacity = 0; // Solid tile grid border looks cluttered, turn off border stroke
+          style.interactive = false;
+          var rect = L.rectangle(tData.bounds, style);
+          rect._record = tData.rec;
+          heatmapTiles[key] = rect;
+          heatmapGroup.addLayer(rect);
+        }
+      });
+    } else {
+      heatmapGroup.clearLayers();
+      heatmapTiles = {};
     }
   }
 

@@ -42,6 +42,7 @@ class DetectionRecord:
     layer_keys: list[str] = field(default_factory=list)
     polygon_wgs84: Optional[list[tuple[float, float]]] = None
     bbox_wgs84: Optional[list[tuple[float, float]]] = None
+    heatmap_tile_wgs84: Optional[list[tuple[float, float]]] = None
 
 
 @dataclass
@@ -305,6 +306,15 @@ def run_funnel_mapping_geotiff(
                         d_bbox_wgs84 = [(lat_tl, lon_tl), (lat_br, lon_br)]
                     except Exception:
                         d_bbox_wgs84 = None
+                    try:
+                        heatmap_grid_px = 1 #128  # Adjust this value for smaller/larger squares
+                        tx = int(px // heatmap_grid_px) * heatmap_grid_px
+                        ty = int(py // heatmap_grid_px) * heatmap_grid_px
+                        lat_t0, lon_t0 = _raster_pixel_to_wgs84(dataset, tx, ty)
+                        lat_t1, lon_t1 = _raster_pixel_to_wgs84(dataset, tx + heatmap_grid_px, ty + heatmap_grid_px)
+                        d_htile_wgs84 = [(lat_t0, lon_t0), (lat_t1, lon_t1)]
+                    except Exception:
+                        d_htile_wgs84 = None
                 except Exception:
                     qa_summary["coordinate_projection_failures"] += 1
                     qa_summary["rejected_disease_predictions"] += 1
@@ -349,6 +359,7 @@ def run_funnel_mapping_geotiff(
                                 source="ai_unmatched",
                                 layer_keys=[disease.class_name],
                                 bbox_wgs84=d_bbox_wgs84,
+                                heatmap_tile_wgs84=d_htile_wgs84,
                             )
                         )
                         crop_path = ""
@@ -436,6 +447,7 @@ def run_funnel_mapping_geotiff(
                         related_leaf_id=containing_leaf.id,
                         layer_keys=[disease.class_name],
                         bbox_wgs84=d_bbox_wgs84,
+                        heatmap_tile_wgs84=d_htile_wgs84,
                     )
                 )
                 
@@ -454,6 +466,15 @@ def run_funnel_mapping_geotiff(
                         l_bbox_wgs84 = [(lat_tl, lon_tl), (lat_br, lon_br)]
                     except Exception:
                         l_bbox_wgs84 = None
+                    try:
+                        heatmap_grid_px = 1 #128  # Match the value above
+                        tx = int(px // heatmap_grid_px) * heatmap_grid_px
+                        ty = int(py // heatmap_grid_px) * heatmap_grid_px
+                        lat_t0, lon_t0 = _raster_pixel_to_wgs84(dataset, tx, ty)
+                        lat_t1, lon_t1 = _raster_pixel_to_wgs84(dataset, tx + heatmap_grid_px, ty + heatmap_grid_px)
+                        l_htile_wgs84 = [(lat_t0, lon_t0), (lat_t1, lon_t1)]
+                    except Exception:
+                        l_htile_wgs84 = None
                 except Exception:
                     continue
 
@@ -484,6 +505,7 @@ def run_funnel_mapping_geotiff(
                         layer_keys=layer_keys,
                         polygon_wgs84=poly_wgs84 if poly_wgs84 else None,
                         bbox_wgs84=l_bbox_wgs84,
+                        heatmap_tile_wgs84=l_htile_wgs84,
                     )
                 )
 
@@ -832,6 +854,7 @@ _OUTPUT_FIELDS = [
     "layer_keys",
     "polygon_wgs84",
     "bbox_wgs84",
+    "heatmap_tile_wgs84",
 ]
 
 

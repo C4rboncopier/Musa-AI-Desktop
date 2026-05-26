@@ -296,6 +296,7 @@ class WorkspacePage(QWidget):
             ("show_dots", "Show center dots", True),
             ("show_bboxes", "Show bounding boxes", True),
             ("show_polygons", "Show polygon masks", False),
+            ("show_tile_heatmap", "Show tile heatmap", False),
         ]
         for key, label, default_state in style_specs:
             checkbox = QCheckBox(label)
