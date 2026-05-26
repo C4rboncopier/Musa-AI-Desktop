@@ -55,6 +55,7 @@ from .ui.dialogs import EditProjectDialog, NewProjectDialog, PreferredModelsDial
 from .ui.settings import SettingsPage
 from .ui.workspace import WorkspacePage
 from .worker import AiGeotiffMappingWorker, GeoTiffWorker, HardwareCheckWorker
+from .csv_map_importer import parse_csv_coordinates, CsvImportError
 
 
 BASE_MAPS = {"osm", "google_satellite"}
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
         self.current_bundle: ProjectBundle | None = None
         self.current_geotiff: GeoTiffInfo | None = None
         self.latest_mapping_result: MappingResult | None = None
+        self.imported_csv_records: list[dict] = []
         self.geotiff_cache = GeoTiffSessionCache(
             max_items=4,
             cache_dir=None,
@@ -219,6 +221,8 @@ class MainWindow(QMainWindow):
 
         self.workspace.backRequested.connect(self.show_dashboard)
         self.workspace.importGeoTiffRequested.connect(self.open_geotiff)
+        self.workspace.importCsvRequested.connect(self.import_csv_file)
+        self.workspace.drawOnMapRequested.connect(self.draw_csv_markers)
         self.workspace.runMappingRequested.connect(self.run_ai_mapping)
         self.workspace.fitMapRequested.connect(self.fit_overlay)
         self.workspace.resetViewRequested.connect(self.reset_view)
@@ -229,6 +233,7 @@ class MainWindow(QMainWindow):
         self.workspace.overlayOpacityChanged.connect(self._set_overlay_opacity)
         self.workspace.detectionOpacityChanged.connect(self._set_detection_opacity)
         self.workspace.detectionLayerChanged.connect(self._set_detection_layer_visible)
+        self.workspace.detectionStyleChanged.connect(self._set_detection_style)
         self.workspace.resolutionChanged.connect(self._on_resolution_changed)
         self.workspace.projectOutputOpenRequested.connect(self.open_project_output_folder)
         self.workspace.outputsRefreshRequested.connect(self.refresh_project_outputs)
@@ -1046,6 +1051,84 @@ class MainWindow(QMainWindow):
         self.workspace.append_log(message)
         self.statusBar().showMessage(message, 3000)
 
+    def import_csv_file(self) -> None:
+        bundle = self._require_project()
+        if bundle is None:
+            return
+        
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Coordinates CSV",
+            "",
+            "CSV files (*.csv);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            records = parse_csv_coordinates(path)
+            self.imported_csv_records = records
+            self.workspace.set_draw_button_enabled(True)
+            self.workspace.append_log(f"Successfully imported {len(records)} coordinate(s) from {Path(path).name}")
+            self.statusBar().showMessage(f"Imported {len(records)} coordinate(s) from CSV.", 5000)
+        except CsvImportError as exc:
+            self.imported_csv_records = []
+            self.workspace.set_draw_button_enabled(False)
+            self.workspace.append_log(f"CSV import failed: {exc}")
+            QMessageBox.critical(self, "CSV Import Error", str(exc))
+            self.statusBar().showMessage("CSV import failed.", 5000)
+
+    def draw_csv_markers(self) -> None:
+        if not self.imported_csv_records:
+            return
+
+        records = []
+        counts = {"black_sigatoka": 0, "panama": 0}
+        
+        for idx, item in enumerate(self.imported_csv_records):
+            name = item["name"]
+            name_lower = name.lower()
+            if "panama" in name_lower or "fusarium" in name_lower or "wilt" in name_lower:
+                class_name = "panama"
+            elif "sigatoka" in name_lower or "black" in name_lower:
+                class_name = "black_sigatoka"
+            else:
+                class_name = "black_sigatoka"
+
+            r = DetectionRecord(
+                id=f"csv-import-{idx}",
+                image_name=name,
+                class_name=class_name,
+                latitude=item["latitude"],
+                longitude=item["longitude"],
+                confidence=1.0,
+                pixel_x=0.0,
+                pixel_y=0.0,
+                health="diseased",
+                source="csv",
+                layer_keys=[class_name],
+            )
+            records.append(r)
+            counts[class_name] = counts.get(class_name, 0) + 1
+
+        result = MappingResult(
+            records=records,
+            counts=counts,
+            json_path="",
+            csv_path="",
+            xlsx_path="",
+            processed_images=0,
+            skipped_images=0,
+            warnings=[],
+        )
+        self.workspace.update_counts(counts)
+        self._send_detections_to_map(result)
+        self.workspace.append_log(
+            f"Plotted {len(records)} marker(s) on map "
+            f"(Black Sigatoka: {counts.get('black_sigatoka', 0)}, Panama: {counts.get('panama', 0)})"
+        )
+        self.statusBar().showMessage("CSV coordinates drawn on map.", 5000)
+
     def open_project_output_folder(self) -> None:
         output_dir = self._current_output_dir()
         if output_dir is None:
@@ -1451,8 +1534,8 @@ class MainWindow(QMainWindow):
         payload = result.to_map_payload()
         visibility = {
             "full_leaf": False,
-            "healthy_leaf": False,
-            "diseased_leaf": False,
+            "healthy_leaf": True,
+            "diseased_leaf": True,
         }
         visibility.update(
             {
@@ -1461,6 +1544,10 @@ class MainWindow(QMainWindow):
             }
         )
         payload["visibility"] = visibility
+        payload["styles"] = {
+            key: checkbox.isChecked()
+            for key, checkbox in self.workspace.style_toggles.items()
+        }
         payload["opacity"] = self.workspace.ai_opacity_slider.value() / 100
         self._run_js(f"setDetectionData({json.dumps(payload)});")
 
@@ -1489,6 +1576,9 @@ class MainWindow(QMainWindow):
         self._run_js(
             f"setDetectionLayerVisible({json.dumps(layer_key)}, {str(checked).lower()});"
         )
+
+    def _set_detection_style(self, style_key: str, checked: bool) -> None:
+        self._run_js(f"setDetectionStyle({json.dumps(style_key)}, {str(checked).lower()});")
 
     def _set_detection_opacity(self, value: int) -> None:
         self._run_js(f"setDetectionOpacity({value / 100:.2f});")

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import json
@@ -40,6 +40,9 @@ class DetectionRecord:
     duplicate_count: int = 1
     related_leaf_id: Optional[str] = None
     layer_keys: list[str] = field(default_factory=list)
+    polygon_wgs84: Optional[list[tuple[float, float]]] = None
+    bbox_wgs84: Optional[list[tuple[float, float]]] = None
+    heatmap_tile_wgs84: Optional[list[tuple[float, float]]] = None
 
 
 @dataclass
@@ -297,6 +300,21 @@ def run_funnel_mapping_geotiff(
                 px, py = disease.center
                 try:
                     lat, lon = _raster_pixel_to_wgs84(dataset, px, py)
+                    try:
+                        lat_tl, lon_tl = _raster_pixel_to_wgs84(dataset, disease.bbox[0], disease.bbox[1])
+                        lat_br, lon_br = _raster_pixel_to_wgs84(dataset, disease.bbox[2], disease.bbox[3])
+                        d_bbox_wgs84 = [(lat_tl, lon_tl), (lat_br, lon_br)]
+                    except Exception:
+                        d_bbox_wgs84 = None
+                    try:
+                        heatmap_grid_px = 1 #128  # Adjust this value for smaller/larger squares
+                        tx = int(px // heatmap_grid_px) * heatmap_grid_px
+                        ty = int(py // heatmap_grid_px) * heatmap_grid_px
+                        lat_t0, lon_t0 = _raster_pixel_to_wgs84(dataset, tx, ty)
+                        lat_t1, lon_t1 = _raster_pixel_to_wgs84(dataset, tx + heatmap_grid_px, ty + heatmap_grid_px)
+                        d_htile_wgs84 = [(lat_t0, lon_t0), (lat_t1, lon_t1)]
+                    except Exception:
+                        d_htile_wgs84 = None
                 except Exception:
                     qa_summary["coordinate_projection_failures"] += 1
                     qa_summary["rejected_disease_predictions"] += 1
@@ -340,6 +358,8 @@ def run_funnel_mapping_geotiff(
                                 health="unmatched",
                                 source="ai_unmatched",
                                 layer_keys=[disease.class_name],
+                                bbox_wgs84=d_bbox_wgs84,
+                                heatmap_tile_wgs84=d_htile_wgs84,
                             )
                         )
                         crop_path = ""
@@ -426,6 +446,8 @@ def run_funnel_mapping_geotiff(
                         health="diseased",
                         related_leaf_id=containing_leaf.id,
                         layer_keys=[disease.class_name],
+                        bbox_wgs84=d_bbox_wgs84,
+                        heatmap_tile_wgs84=d_htile_wgs84,
                     )
                 )
                 
@@ -438,12 +460,36 @@ def run_funnel_mapping_geotiff(
                 px, py = leaf.center
                 try:
                     lat, lon = _raster_pixel_to_wgs84(dataset, px, py)
+                    try:
+                        lat_tl, lon_tl = _raster_pixel_to_wgs84(dataset, leaf.bbox[0], leaf.bbox[1])
+                        lat_br, lon_br = _raster_pixel_to_wgs84(dataset, leaf.bbox[2], leaf.bbox[3])
+                        l_bbox_wgs84 = [(lat_tl, lon_tl), (lat_br, lon_br)]
+                    except Exception:
+                        l_bbox_wgs84 = None
+                    try:
+                        heatmap_grid_px = 1 #128  # Match the value above
+                        tx = int(px // heatmap_grid_px) * heatmap_grid_px
+                        ty = int(py // heatmap_grid_px) * heatmap_grid_px
+                        lat_t0, lon_t0 = _raster_pixel_to_wgs84(dataset, tx, ty)
+                        lat_t1, lon_t1 = _raster_pixel_to_wgs84(dataset, tx + heatmap_grid_px, ty + heatmap_grid_px)
+                        l_htile_wgs84 = [(lat_t0, lon_t0), (lat_t1, lon_t1)]
+                    except Exception:
+                        l_htile_wgs84 = None
                 except Exception:
                     continue
 
                 layer_keys = [leaf.class_name]
                 if leaf.class_name == "full_leaf" and leaf.health:
                     layer_keys.append(f"{leaf.health}_leaf")
+
+                # Downsample the polygon (every 4th point) to save JSON size and processing time
+                poly_wgs84 = []
+                for px, py in leaf.polygon[::4]:
+                    try:
+                        p_lat, p_lon = _raster_pixel_to_wgs84(dataset, px, py)
+                        poly_wgs84.append((p_lat, p_lon))
+                    except Exception:
+                        pass
 
                 all_records.append(
                     DetectionRecord(
@@ -457,6 +503,9 @@ def run_funnel_mapping_geotiff(
                         pixel_y=py,
                         health=leaf.health,
                         layer_keys=layer_keys,
+                        polygon_wgs84=poly_wgs84 if poly_wgs84 else None,
+                        bbox_wgs84=l_bbox_wgs84,
+                        heatmap_tile_wgs84=l_htile_wgs84,
                     )
                 )
 
@@ -803,6 +852,9 @@ _OUTPUT_FIELDS = [
     "duplicate_count",
     "related_leaf_id",
     "layer_keys",
+    "polygon_wgs84",
+    "bbox_wgs84",
+    "heatmap_tile_wgs84",
 ]
 
 
@@ -1087,4 +1139,3 @@ def _generate_tiles(
 def _report(cb: _ProgressCb, percent: int, message: str) -> None:
     if cb is not None:
         cb(percent, message)
-
