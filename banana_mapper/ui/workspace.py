@@ -181,11 +181,28 @@ class WorkspacePage(QWidget):
         self._connect_ui()
 
     def _build_left_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("workspaceSidePanel")
+        # panel = QFrame()
+        # panel.setObjectName("workspaceSidePanel")
+        # layout = QVBoxLayout(panel)
+        
+        outer_panel = QFrame()
+        outer_panel.setObjectName("workspaceSidePanel")
+        outer_layout = QVBoxLayout(outer_panel)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
+
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+        # self._emit_side_panel_visibility(index, visible)
 
         layout.addWidget(section_label("Project Explorer"))
         project_card = card("Session")
@@ -242,8 +259,7 @@ class WorkspacePage(QWidget):
         layout.addWidget(project_card)
 
         layout.addWidget(section_label("Layers"))
-        layer_card = card("Map Layers")
-        lc_layout = layer_card.layout()
+        layer_card, lc_layout = self._create_collapsible_card("Map Layers", default_visible=True)
         self.visibility_toggle = QCheckBox("Orthomosaic")
         self.visibility_toggle.setChecked(True)
         self.visibility_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -290,8 +306,7 @@ class WorkspacePage(QWidget):
             lc_layout.addWidget(checkbox)
         layout.addWidget(layer_card)
 
-        style_card = card("Visual Styles")
-        sc_layout = style_card.layout()
+        style_card, sc_layout = self._create_collapsible_card("Visual Styles", default_visible=False)
         style_specs = [
             ("show_dots", "Show center dots", True),
             ("show_bboxes", "Show bounding boxes", True),
@@ -322,7 +337,45 @@ class WorkspacePage(QWidget):
         layout.addWidget(counts)
 
         layout.addStretch(1)
-        return panel
+        scroll.setWidget(panel)
+        outer_layout.addWidget(scroll)
+        return outer_panel
+
+    def _create_collapsible_card(self, title: str, default_visible: bool = True) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+
+        header_layout = QHBoxLayout()
+        heading = QLabel(title.upper())
+        heading.setObjectName("cardTitle")
+        
+        toggle_btn = QPushButton("−" if default_visible else "+")
+        toggle_btn.setObjectName("collapseButton")
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        header_layout.addWidget(heading)
+        header_layout.addStretch(1)
+        header_layout.addWidget(toggle_btn)
+        layout.addLayout(header_layout)
+
+        content_frame = QFrame()
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_frame.setVisible(default_visible)
+        
+        def toggle() -> None:
+            is_visible = not content_frame.isVisible()
+            content_frame.setVisible(is_visible)
+            toggle_btn.setText("−" if is_visible else "+")
+            
+        toggle_btn.clicked.connect(toggle)
+        
+        layout.addWidget(content_frame)
+        return frame, content_layout
 
     def _build_map_panel(self) -> QWidget:
         panel = QFrame()
